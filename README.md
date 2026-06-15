@@ -1,5 +1,7 @@
 # Straylight Studio
 
+This was coded with assistance from AI agents (Codex) I am not a professional coder - and there will be bugs/rough edges. Use at your own risk.
+
 Straylight Studio is a cross-platform astrophotography control surface for a Windows-based miniPC running NINA, PHD2, ASTAP, and camera/mount/focuser drivers.
 
 The goal is to keep the heavy, flaky hardware stack close to the telescope while letting the main machine handle planning, monitoring, capture orchestration, frame transfer, and eventually processing.
