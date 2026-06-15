@@ -1,0 +1,34 @@
+# Dependencies
+node_modules/
+
+# Frontend build output
+dist/
+
+# Tauri / Rust build output
+src-tauri/target/
+src-tauri/gen/schemas/
+
+# .NET build output
+**/bin/
+**/obj/
+
+# Local scratch and generated test data
+tmp/
+*.tsbuildinfo
+
+# Runtime logs
+*.log
+
+# Local UI verification screenshots
+ui-*.png
+
+# Local environment files
+.env
+.env.*
+!.env.example
+
+# OS/editor noise
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
