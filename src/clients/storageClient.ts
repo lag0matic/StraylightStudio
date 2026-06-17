@@ -44,6 +44,7 @@ export type RenderFitsPreviewResult = {
   width: number;
   height: number;
   source_path: string;
+  color: boolean;
   black_point: number;
   midtone: number;
   white_point: number;

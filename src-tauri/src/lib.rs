@@ -86,6 +86,7 @@ struct FitsPreviewResult {
     width: u32,
     height: u32,
     source_path: String,
+    color: bool,
     black_point: f64,
     midtone: f64,
     white_point: f64,
@@ -97,6 +98,13 @@ struct FitsHeader {
     data_offset: usize,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BayerColor {
+    Red,
+    Green,
+    Blue,
+}
+
 #[derive(Debug, Clone)]
 struct CachedFitsPreview {
     path: PathBuf,
@@ -105,9 +113,10 @@ struct CachedFitsPreview {
     width: u32,
     height: u32,
     source_path: String,
-    values: Vec<f64>,
+    values: Vec<[f64; 3]>,
     auto_black: f64,
     auto_white: f64,
+    color: bool,
 }
 
 static FITS_PREVIEW_CACHE: OnceLock<Mutex<Option<CachedFitsPreview>>> = OnceLock::new();
@@ -344,7 +353,123 @@ fn read_fits_value(
     }
 }
 
-fn bmp_data_url_from_gray(width: u32, height: u32, pixels: &[u8]) -> Result<String, String> {
+fn parse_bayer_color(value: char) -> Option<BayerColor> {
+    match value {
+        'R' => Some(BayerColor::Red),
+        'G' => Some(BayerColor::Green),
+        'B' => Some(BayerColor::Blue),
+        _ => None,
+    }
+}
+
+fn bayer_pattern_from_header(cards: &HashMap<String, String>) -> Option<[BayerColor; 4]> {
+    let pattern = cards
+        .get("BAYERPAT")
+        .or_else(|| cards.get("BAYER"))
+        .or_else(|| cards.get("COLORTYP"))
+        .map(|value| value.trim().to_ascii_uppercase())?;
+    let mut chars = pattern.chars();
+    let first = parse_bayer_color(chars.next()?)?;
+    let second = parse_bayer_color(chars.next()?)?;
+    let third = parse_bayer_color(chars.next()?)?;
+    let fourth = parse_bayer_color(chars.next()?)?;
+
+    Some([first, second, third, fourth])
+}
+
+fn bayer_color_at(
+    pattern: &[BayerColor; 4],
+    x: usize,
+    y: usize,
+    x_offset: usize,
+    y_offset: usize,
+) -> BayerColor {
+    let pattern_x = (x + x_offset) % 2;
+    let pattern_y = (y + y_offset) % 2;
+    pattern[pattern_y * 2 + pattern_x]
+}
+
+fn read_fits_pixel_value(
+    data: &[u8],
+    bitpix: i64,
+    source_width: usize,
+    source_height: usize,
+    x: usize,
+    y: usize,
+    bzero: f64,
+    bscale: f64,
+) -> Result<f64, String> {
+    let clamped_x = x.min(source_width - 1);
+    let clamped_y = y.min(source_height - 1);
+    read_fits_value(
+        data,
+        bitpix,
+        clamped_y * source_width + clamped_x,
+        bzero,
+        bscale,
+    )
+}
+
+fn sample_bayer_channel(
+    data: &[u8],
+    bitpix: i64,
+    source_width: usize,
+    source_height: usize,
+    x: usize,
+    y: usize,
+    bzero: f64,
+    bscale: f64,
+    pattern: &[BayerColor; 4],
+    x_offset: usize,
+    y_offset: usize,
+    channel: BayerColor,
+) -> Result<f64, String> {
+    let mut total = 0.0;
+    let mut count = 0usize;
+    let min_y = y.saturating_sub(1);
+    let max_y = (y + 1).min(source_height - 1);
+    let min_x = x.saturating_sub(1);
+    let max_x = (x + 1).min(source_width - 1);
+
+    for sample_y in min_y..=max_y {
+        for sample_x in min_x..=max_x {
+            if bayer_color_at(pattern, sample_x, sample_y, x_offset, y_offset) == channel {
+                total += read_fits_pixel_value(
+                    data,
+                    bitpix,
+                    source_width,
+                    source_height,
+                    sample_x,
+                    sample_y,
+                    bzero,
+                    bscale,
+                )?;
+                count += 1;
+            }
+        }
+    }
+
+    if count == 0 {
+        read_fits_pixel_value(
+            data,
+            bitpix,
+            source_width,
+            source_height,
+            x,
+            y,
+            bzero,
+            bscale,
+        )
+    } else {
+        Ok(total / count as f64)
+    }
+}
+
+fn luminance(pixel: &[f64; 3]) -> f64 {
+    pixel[0] * 0.2126 + pixel[1] * 0.7152 + pixel[2] * 0.0722
+}
+
+fn bmp_data_url_from_rgb(width: u32, height: u32, pixels: &[[u8; 3]]) -> Result<String, String> {
     let row_stride = ((width * 3 + 3) / 4) * 4;
     let pixel_bytes = row_stride
         .checked_mul(height)
@@ -375,8 +500,8 @@ fn bmp_data_url_from_gray(width: u32, height: u32, pixels: &[u8]) -> Result<Stri
     for row in (0..height as usize).rev() {
         let row_start = row * width as usize;
         for col in 0..width as usize {
-            let value = pixels[row_start + col];
-            bmp.extend_from_slice(&[value, value, value]);
+            let [red, green, blue] = pixels[row_start + col];
+            bmp.extend_from_slice(&[blue, green, red]);
         }
         bmp.extend(std::iter::repeat(0).take(padding));
     }
@@ -385,6 +510,15 @@ fn bmp_data_url_from_gray(width: u32, height: u32, pixels: &[u8]) -> Result<Stri
         "data:image/bmp;base64,{}",
         BASE64_STANDARD.encode(bmp)
     ))
+}
+
+#[cfg(test)]
+fn bmp_data_url_from_gray(width: u32, height: u32, pixels: &[u8]) -> Result<String, String> {
+    let rgb_pixels = pixels
+        .iter()
+        .map(|value| [*value, *value, *value])
+        .collect::<Vec<_>>();
+    bmp_data_url_from_rgb(width, height, &rgb_pixels)
 }
 
 fn percentile(sorted_values: &[f64], percent: f64) -> Option<f64> {
@@ -436,6 +570,15 @@ fn sample_fits_preview(
     let bitpix = fits_i64(&header.cards, "BITPIX")?;
     let bzero = fits_f64(&header.cards, "BZERO", 0.0);
     let bscale = fits_f64(&header.cards, "BSCALE", 1.0);
+    let x_binning = fits_i64(&header.cards, "XBINNING").unwrap_or(1);
+    let y_binning = fits_i64(&header.cards, "YBINNING").unwrap_or(1);
+    let x_bayer_offset = fits_i64(&header.cards, "XBAYROFF").unwrap_or(0).max(0) as usize;
+    let y_bayer_offset = fits_i64(&header.cards, "YBAYROFF").unwrap_or(0).max(0) as usize;
+    let bayer_pattern = if x_binning == 1 && y_binning == 1 {
+        bayer_pattern_from_header(&header.cards)
+    } else {
+        None
+    };
     let max_size = request.max_size.unwrap_or(1400).clamp(128, 2400);
     let scale = (max_size as f64 / source_width.max(source_height) as f64).min(1.0);
     let width = ((source_width as f64 * scale).round() as usize).max(1);
@@ -444,22 +587,77 @@ fn sample_fits_preview(
         .get(header.data_offset..)
         .ok_or_else(|| "FITS data section is missing".to_string())?;
     let mut sampled_values = Vec::with_capacity(width * height);
+    let mut stretch_values = Vec::with_capacity(width * height);
 
     for y in 0..height {
         let source_y = ((y as f64 / scale).floor() as usize).min(source_height - 1);
         for x in 0..width {
             let source_x = ((x as f64 / scale).floor() as usize).min(source_width - 1);
-            sampled_values.push(read_fits_value(
-                data,
-                bitpix,
-                source_y * source_width + source_x,
-                bzero,
-                bscale,
-            )?);
+            let pixel = if let Some(pattern) = bayer_pattern {
+                [
+                    sample_bayer_channel(
+                        data,
+                        bitpix,
+                        source_width,
+                        source_height,
+                        source_x,
+                        source_y,
+                        bzero,
+                        bscale,
+                        &pattern,
+                        x_bayer_offset,
+                        y_bayer_offset,
+                        BayerColor::Red,
+                    )?,
+                    sample_bayer_channel(
+                        data,
+                        bitpix,
+                        source_width,
+                        source_height,
+                        source_x,
+                        source_y,
+                        bzero,
+                        bscale,
+                        &pattern,
+                        x_bayer_offset,
+                        y_bayer_offset,
+                        BayerColor::Green,
+                    )?,
+                    sample_bayer_channel(
+                        data,
+                        bitpix,
+                        source_width,
+                        source_height,
+                        source_x,
+                        source_y,
+                        bzero,
+                        bscale,
+                        &pattern,
+                        x_bayer_offset,
+                        y_bayer_offset,
+                        BayerColor::Blue,
+                    )?,
+                ]
+            } else {
+                let value = read_fits_pixel_value(
+                    data,
+                    bitpix,
+                    source_width,
+                    source_height,
+                    source_x,
+                    source_y,
+                    bzero,
+                    bscale,
+                )?;
+                [value, value, value]
+            };
+
+            stretch_values.push(luminance(&pixel));
+            sampled_values.push(pixel);
         }
     }
 
-    let (auto_black, auto_white) = auto_stretch_bounds(&sampled_values);
+    let (auto_black, auto_white) = auto_stretch_bounds(&stretch_values);
 
     Ok(CachedFitsPreview {
         path,
@@ -471,6 +669,7 @@ fn sample_fits_preview(
         values: sampled_values,
         auto_black,
         auto_white,
+        color: bayer_pattern.is_some(),
     })
 }
 
@@ -497,17 +696,28 @@ fn render_cached_fits_preview(
     let mut pixels = Vec::with_capacity(preview.values.len());
 
     for value in &preview.values {
-        let normalized = ((value - black) / (white - black))
+        let red = ((value[0] - black) / (white - black))
             .clamp(0.0, 1.0)
             .powf(gamma);
-        pixels.push((normalized * 255.0).round() as u8);
+        let green = ((value[1] - black) / (white - black))
+            .clamp(0.0, 1.0)
+            .powf(gamma);
+        let blue = ((value[2] - black) / (white - black))
+            .clamp(0.0, 1.0)
+            .powf(gamma);
+        pixels.push([
+            (red * 255.0).round() as u8,
+            (green * 255.0).round() as u8,
+            (blue * 255.0).round() as u8,
+        ]);
     }
 
     Ok(FitsPreviewResult {
-        data_url: bmp_data_url_from_gray(preview.width, preview.height, &pixels)?,
+        data_url: bmp_data_url_from_rgb(preview.width, preview.height, &pixels)?,
         width: preview.width,
         height: preview.height,
         source_path: preview.source_path.clone(),
+        color: preview.color,
         black_point: black,
         midtone,
         white_point: white,
@@ -896,6 +1106,47 @@ mod tests {
         assert_eq!(preview.height, 1);
         assert_eq!(preview.black_point, 0.0);
         assert_eq!(preview.white_point, 65535.0);
+        assert!(preview.data_url.starts_with("data:image/bmp;base64,"));
+    }
+
+    #[test]
+    fn renders_bayer_fits_as_color_preview() {
+        let mut fits = Vec::new();
+        fits.extend_from_slice(format!("{:<80}", "SIMPLE  =                    T").as_bytes());
+        fits.extend_from_slice(format!("{:<80}", "BITPIX  =                   16").as_bytes());
+        fits.extend_from_slice(format!("{:<80}", "NAXIS   =                    2").as_bytes());
+        fits.extend_from_slice(format!("{:<80}", "NAXIS1  =                    2").as_bytes());
+        fits.extend_from_slice(format!("{:<80}", "NAXIS2  =                    2").as_bytes());
+        fits.extend_from_slice(format!("{:<80}", "BZERO   =                32768").as_bytes());
+        fits.extend_from_slice(format!("{:<80}", "BSCALE  =                    1").as_bytes());
+        fits.extend_from_slice(format!("{:<80}", "BAYERPAT= 'RGGB'").as_bytes());
+        fits.extend_from_slice(format!("{:<80}", "XBAYROFF=                    0").as_bytes());
+        fits.extend_from_slice(format!("{:<80}", "YBAYROFF=                    0").as_bytes());
+        fits.extend_from_slice(format!("{:<80}", "XBINNING=                    1").as_bytes());
+        fits.extend_from_slice(format!("{:<80}", "YBINNING=                    1").as_bytes());
+        fits.extend_from_slice(format!("{:<80}", "END").as_bytes());
+        fits.resize(2880, b' ');
+        fits.extend_from_slice(&32767i16.to_be_bytes());
+        fits.extend_from_slice(&0i16.to_be_bytes());
+        fits.extend_from_slice(&0i16.to_be_bytes());
+        fits.extend_from_slice(&i16::MIN.to_be_bytes());
+
+        let preview = render_fits_to_preview(
+            &fits,
+            &FitsPreviewRequest {
+                path: "color-test.fits".to_string(),
+                max_size: Some(100),
+                auto_stretch: Some(true),
+                black_point: None,
+                midtone: Some(1.0),
+                white_point: None,
+            },
+        )
+        .expect("bayer fits should render");
+
+        assert_eq!(preview.width, 2);
+        assert_eq!(preview.height, 2);
+        assert!(preview.color);
         assert!(preview.data_url.starts_with("data:image/bmp;base64,"));
     }
 }
