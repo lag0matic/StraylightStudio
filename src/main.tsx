@@ -1765,32 +1765,52 @@ function TargetingTab({
 function GuidingPanel({ status, message }: { status: Phd2Status | null; message: string }) {
   const samples = status?.samples.slice(-90) ?? [];
   const latest = samples.at(-1);
-  const scale = Math.max(1, ...samples.flatMap((sample) => [Math.abs(sample.dx), Math.abs(sample.dy)]));
+  const errorFor = (sample: PhdGuideSample) => Math.sqrt(sample.dx ** 2 + sample.dy ** 2);
+  const scale = Math.max(1, ...samples.flatMap((sample) => [Math.abs(sample.dx), Math.abs(sample.dy), errorFor(sample)]));
   const width = 720;
-  const height = 220;
+  const height = 190;
   const midY = height / 2;
   const xStep = samples.length > 1 ? width / (samples.length - 1) : width;
   const yFor = (value: number) => midY - (value / scale) * (height * 0.42);
   const pointsFor = (key: 'dx' | 'dy') =>
     samples.map((sample, index) => `${(index * xStep).toFixed(1)},${yFor(sample[key]).toFixed(1)}`).join(' ');
-  const rms = samples.length
-    ? Math.sqrt(samples.reduce((sum, sample) => sum + sample.dx ** 2 + sample.dy ** 2, 0) / samples.length)
-    : 0;
+  const totalPoints = samples
+    .map((sample, index) => `${(index * xStep).toFixed(1)},${yFor(errorFor(sample)).toFixed(1)}`)
+    .join(' ');
+  const rmsFor = (values: number[]) => (values.length ? Math.sqrt(values.reduce((sum, value) => sum + value ** 2, 0) / values.length) : 0);
+  const raRms = rmsFor(samples.map((sample) => sample.dx));
+  const decRms = rmsFor(samples.map((sample) => sample.dy));
+  const totalRms = samples.length ? Math.sqrt(raRms ** 2 + decRms ** 2) : 0;
+  const latestAgeSeconds = status?.lastEventAt ? Math.max(0, (Date.now() - new Date(status.lastEventAt).getTime()) / 1000) : null;
+  const statusText = status?.connected ? status.appState || 'Connected' : message || status?.error || 'Disconnected';
+  const statusClass = status?.connected ? `guide-state ${status.appState.toLowerCase()}` : 'guide-state disconnected';
 
   return (
-    <>
-      <DataTable
-        rows={[
-          ['PHD2', status?.connected ? 'Connected' : message || status?.error || 'Disconnected'],
-          ['State', status?.appState || '-'],
-          ['Version', status?.version || '-'],
-          ['Last event', status?.lastEvent || '-'],
-          ['Samples', samples.length],
-          ['RMS pixels', samples.length ? rms.toFixed(2) : '-'],
-          ['Latest RA / Dec', latest ? `${latest.dx.toFixed(2)} / ${latest.dy.toFixed(2)} px` : '-'],
-          ['Latest SNR / HFD', latest ? `${formatOptional(latest.snr)} / ${formatOptional(latest.hfd)}` : '-']
-        ]}
-      />
+    <div className="guiding-panel">
+      <div className="guide-status-row">
+        <div className={statusClass}>{statusText}</div>
+        <div>{status?.version || 'PHD2'}</div>
+        <div>{status?.lastEvent || 'No events'}</div>
+        <div>{latestAgeSeconds === null ? '-' : `${latestAgeSeconds.toFixed(0)}s ago`}</div>
+      </div>
+      <div className="guide-metrics">
+        <div>
+          <span>Total RMS</span>
+          <strong>{samples.length ? `${totalRms.toFixed(2)} px` : '-'}</strong>
+        </div>
+        <div>
+          <span>RA RMS</span>
+          <strong>{samples.length ? `${raRms.toFixed(2)} px` : '-'}</strong>
+        </div>
+        <div>
+          <span>Dec RMS</span>
+          <strong>{samples.length ? `${decRms.toFixed(2)} px` : '-'}</strong>
+        </div>
+        <div>
+          <span>SNR / HFD</span>
+          <strong>{latest ? `${formatOptional(latest.snr)} / ${formatOptional(latest.hfd)}` : '-'}</strong>
+        </div>
+      </div>
       <div className="guide-graph" aria-label="PHD2 guiding graph">
         <svg viewBox={`0 0 ${width} ${height}`} role="img">
           <line className="guide-grid-line guide-midline" x1="0" x2={width} y1={midY} y2={midY} />
@@ -1800,16 +1820,24 @@ function GuidingPanel({ status, message }: { status: Phd2Status | null; message:
             <>
               <polyline className="guide-line guide-ra" points={pointsFor('dx')} />
               <polyline className="guide-line guide-dec" points={pointsFor('dy')} />
+              <polyline className="guide-line guide-total" points={totalPoints} />
             </>
           ) : null}
         </svg>
         <div className="guide-legend">
-          <span>RA</span>
-          <span>Dec</span>
-          <span>{`±${scale.toFixed(1)} px`}</span>
+          <span><i className="guide-key guide-key-ra" />RA</span>
+          <span><i className="guide-key guide-key-dec" />Dec</span>
+          <span><i className="guide-key guide-key-total" />Total</span>
+          <span>{`+/-${scale.toFixed(1)} px`}</span>
         </div>
       </div>
-    </>
+      <div className="guide-detail-row">
+        <span>{latest ? `Latest ${latest.dx.toFixed(2)} / ${latest.dy.toFixed(2)} px` : 'Waiting for guide samples'}</span>
+        <span>{latest?.raDuration ? `RA ${latest.raDuration.toFixed(0)}ms ${latest.raDirection ?? ''}` : 'RA pulse -'}</span>
+        <span>{latest?.decDuration ? `Dec ${latest.decDuration.toFixed(0)}ms ${latest.decDirection ?? ''}` : 'Dec pulse -'}</span>
+        <span>{samples.length ? `${samples.length} samples` : 'No samples'}</span>
+      </div>
+    </div>
   );
 }
 

@@ -773,9 +773,83 @@ h2 {
   text-align: right;
 }
 
-.guide-graph {
+.guiding-panel {
+  display: grid;
+  gap: 10px;
   padding: 12px;
-  border-top: 1px solid var(--border);
+}
+
+.guide-status-row,
+.guide-detail-row {
+  display: grid;
+  grid-template-columns: minmax(120px, 1.2fr) repeat(3, minmax(80px, 1fr));
+  gap: 8px;
+  align-items: center;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.guide-status-row > div,
+.guide-detail-row > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.guide-state {
+  color: var(--text);
+  font-weight: 650;
+}
+
+.guide-state.guiding {
+  color: #b9d7b9;
+}
+
+.guide-state.lostlock,
+.guide-state.disconnected {
+  color: #e0a2a2;
+}
+
+.guide-state.calibrating,
+.guide-state.paused {
+  color: #e2c780;
+}
+
+.guide-metrics {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  overflow: hidden;
+}
+
+.guide-metrics > div {
+  display: grid;
+  gap: 4px;
+  padding: 9px 10px;
+  border-right: 1px solid var(--border);
+  background: #171719;
+}
+
+.guide-metrics > div:last-child {
+  border-right: 0;
+}
+
+.guide-metrics span {
+  color: var(--quiet);
+  font-size: 11px;
+}
+
+.guide-metrics strong {
+  color: var(--text);
+  font-size: 15px;
+  font-variant-numeric: tabular-nums;
+}
+
+.guide-graph {
+  display: grid;
+  gap: 8px;
 }
 
 .guide-graph svg {
@@ -809,12 +883,43 @@ h2 {
   stroke: #d0a85c;
 }
 
+.guide-total {
+  stroke: #b8b8bf;
+  stroke-width: 1.4;
+  opacity: 0.72;
+}
+
 .guide-legend {
   display: flex;
+  align-items: center;
   gap: 14px;
-  margin-top: 8px;
   color: var(--muted);
   font-size: 12px;
+}
+
+.guide-legend span {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.guide-key {
+  display: inline-block;
+  width: 16px;
+  height: 2px;
+  border-radius: 2px;
+}
+
+.guide-key-ra {
+  background: #8fbc8f;
+}
+
+.guide-key-dec {
+  background: #d0a85c;
+}
+
+.guide-key-total {
+  background: #b8b8bf;
 }
 
 .stretch-stack label {
@@ -944,6 +1049,16 @@ h2 {
   .acquisition-grid,
   .stretch-inline {
     grid-template-columns: 1fr;
+  }
+
+  .guide-metrics,
+  .guide-status-row,
+  .guide-detail-row {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .guide-metrics > div:nth-child(2n) {
+    border-right: 0;
   }
 }
 
