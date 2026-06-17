@@ -1,4 +1,10 @@
-use std::{collections::HashMap, fs, path::PathBuf};
+use std::{
+    collections::HashMap,
+    fs,
+    path::PathBuf,
+    sync::{Mutex, OnceLock},
+    time::SystemTime,
+};
 
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine};
 use serde::{Deserialize, Serialize};
@@ -89,6 +95,25 @@ struct FitsPreviewResult {
 struct FitsHeader {
     cards: HashMap<String, String>,
     data_offset: usize,
+}
+
+#[derive(Debug, Clone)]
+struct CachedFitsPreview {
+    path: PathBuf,
+    modified: Option<SystemTime>,
+    max_size: u32,
+    width: u32,
+    height: u32,
+    source_path: String,
+    values: Vec<f64>,
+    auto_black: f64,
+    auto_white: f64,
+}
+
+static FITS_PREVIEW_CACHE: OnceLock<Mutex<Option<CachedFitsPreview>>> = OnceLock::new();
+
+fn fits_preview_cache() -> &'static Mutex<Option<CachedFitsPreview>> {
+    FITS_PREVIEW_CACHE.get_or_init(|| Mutex::new(None))
 }
 
 fn settings_path(app: &AppHandle) -> Result<PathBuf, String> {
@@ -394,10 +419,12 @@ fn auto_stretch_bounds(values: &[f64]) -> (f64, f64) {
     }
 }
 
-fn render_fits_to_preview(
+fn sample_fits_preview(
     bytes: &[u8],
     request: &FitsPreviewRequest,
-) -> Result<FitsPreviewResult, String> {
+    path: PathBuf,
+    modified: Option<SystemTime>,
+) -> Result<CachedFitsPreview, String> {
     let header = parse_fits_header(bytes)?;
     let naxis = fits_i64(&header.cards, "NAXIS")?;
     if naxis < 2 {
@@ -409,14 +436,13 @@ fn render_fits_to_preview(
     let bitpix = fits_i64(&header.cards, "BITPIX")?;
     let bzero = fits_f64(&header.cards, "BZERO", 0.0);
     let bscale = fits_f64(&header.cards, "BSCALE", 1.0);
-    let max_size = request.max_size.unwrap_or(1400).clamp(128, 2400) as usize;
+    let max_size = request.max_size.unwrap_or(1400).clamp(128, 2400);
     let scale = (max_size as f64 / source_width.max(source_height) as f64).min(1.0);
     let width = ((source_width as f64 * scale).round() as usize).max(1);
     let height = ((source_height as f64 * scale).round() as usize).max(1);
     let data = bytes
         .get(header.data_offset..)
         .ok_or_else(|| "FITS data section is missing".to_string())?;
-    let use_auto_stretch = request.auto_stretch.unwrap_or(false);
     let mut sampled_values = Vec::with_capacity(width * height);
 
     for y in 0..height {
@@ -434,21 +460,43 @@ fn render_fits_to_preview(
     }
 
     let (auto_black, auto_white) = auto_stretch_bounds(&sampled_values);
+
+    Ok(CachedFitsPreview {
+        path,
+        modified,
+        max_size,
+        width: width as u32,
+        height: height as u32,
+        source_path: request.path.clone(),
+        values: sampled_values,
+        auto_black,
+        auto_white,
+    })
+}
+
+fn render_cached_fits_preview(
+    preview: &CachedFitsPreview,
+    request: &FitsPreviewRequest,
+) -> Result<FitsPreviewResult, String> {
+    let use_auto_stretch = request.auto_stretch.unwrap_or(false);
     let black = if use_auto_stretch {
-        auto_black
+        preview.auto_black
     } else {
-        request.black_point.unwrap_or(auto_black)
+        request.black_point.unwrap_or(preview.auto_black)
     };
     let white = if use_auto_stretch {
-        auto_white
+        preview.auto_white
     } else {
-        request.white_point.unwrap_or(auto_white).max(black + 1.0)
+        request
+            .white_point
+            .unwrap_or(preview.auto_white)
+            .max(black + 1.0)
     };
     let midtone = request.midtone.unwrap_or(1.0).clamp(0.05, 8.0);
     let gamma = 1.0 / midtone;
-    let mut pixels = Vec::with_capacity(width * height);
+    let mut pixels = Vec::with_capacity(preview.values.len());
 
-    for value in sampled_values {
+    for value in &preview.values {
         let normalized = ((value - black) / (white - black))
             .clamp(0.0, 1.0)
             .powf(gamma);
@@ -456,14 +504,23 @@ fn render_fits_to_preview(
     }
 
     Ok(FitsPreviewResult {
-        data_url: bmp_data_url_from_gray(width as u32, height as u32, &pixels)?,
-        width: width as u32,
-        height: height as u32,
-        source_path: request.path.clone(),
+        data_url: bmp_data_url_from_gray(preview.width, preview.height, &pixels)?,
+        width: preview.width,
+        height: preview.height,
+        source_path: preview.source_path.clone(),
         black_point: black,
         midtone,
         white_point: white,
     })
+}
+
+#[cfg(test)]
+fn render_fits_to_preview(
+    bytes: &[u8],
+    request: &FitsPreviewRequest,
+) -> Result<FitsPreviewResult, String> {
+    let preview = sample_fits_preview(bytes, request, PathBuf::from(&request.path), None)?;
+    render_cached_fits_preview(&preview, request)
 }
 
 fn require_path_under_storage_root(app: &AppHandle, path: &str) -> Result<PathBuf, String> {
@@ -651,8 +708,32 @@ fn render_fits_preview(
     request: FitsPreviewRequest,
 ) -> Result<FitsPreviewResult, String> {
     let path = require_path_under_storage_root(&app, &request.path)?;
-    let bytes = fs::read(&path).map_err(|error| error.to_string())?;
-    render_fits_to_preview(&bytes, &request)
+    let max_size = request.max_size.unwrap_or(1400).clamp(128, 2400);
+    let modified = fs::metadata(&path)
+        .ok()
+        .and_then(|metadata| metadata.modified().ok());
+    let cache = fits_preview_cache();
+    let cached_preview = {
+        let guard = cache.lock().map_err(|error| error.to_string())?;
+
+        guard
+            .as_ref()
+            .filter(|preview| {
+                preview.path == path && preview.modified == modified && preview.max_size == max_size
+            })
+            .cloned()
+    };
+    let preview = if let Some(preview) = cached_preview {
+        preview
+    } else {
+        let bytes = fs::read(&path).map_err(|error| error.to_string())?;
+        let preview = sample_fits_preview(&bytes, &request, path.clone(), modified)?;
+        let mut guard = cache.lock().map_err(|error| error.to_string())?;
+        *guard = Some(preview.clone());
+        preview
+    };
+
+    render_cached_fits_preview(&preview, &request)
 }
 
 #[tauri::command]

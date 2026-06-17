@@ -1838,6 +1838,7 @@ function AcquisitionTab({
   const estimatedDuration = plan ? totalIntegration + (plan.autofocusBeforeRun ? 180 : 0) + (plan.guidingRequired ? 90 : 0) : 0;
   const [previewImage, setPreviewImage] = useState<PreviewImage | null>(null);
   const [stretch, setStretch] = useState<StretchSettings>(defaultStretch);
+  const [renderStretch, setRenderStretch] = useState<StretchSettings>(defaultStretch);
   const [fitsAutoStretch, setFitsAutoStretch] = useState(true);
   const [testExposureSeconds, setTestExposureSeconds] = useState(1);
   const [testExposureGain, setTestExposureGain] = useState(camera?.Gain ?? 200);
@@ -1951,6 +1952,21 @@ function AcquisitionTab({
   }, []);
 
   useEffect(() => {
+    if (fitsAutoStretch) {
+      setRenderStretch(stretch);
+      return undefined;
+    }
+
+    const timeoutId = window.setTimeout(() => {
+      setRenderStretch(stretch);
+    }, 120);
+
+    return () => {
+      window.clearTimeout(timeoutId);
+    };
+  }, [fitsAutoStretch, stretch]);
+
+  useEffect(() => {
     const latestFrame = pipelineState.history[0];
 
     if (!latestFrame?.destinationPath || !latestFrame.fileName.toLowerCase().match(/\.fits?$/)) {
@@ -1961,7 +1977,7 @@ function AcquisitionTab({
 
     const renderLatestFits = async () => {
       try {
-        const preview = await storageClient.renderFitsPreview(latestFrame.destinationPath, stretch, fitsAutoStretch);
+        const preview = await storageClient.renderFitsPreview(latestFrame.destinationPath, renderStretch, fitsAutoStretch);
 
         if (!preview || cancelled) {
           return;
@@ -2001,9 +2017,9 @@ function AcquisitionTab({
     pipelineState.history[0]?.destinationPath,
     pipelineState.history[0]?.fileName,
     pipelineState.history[0]?.sizeBytes,
-    stretch.blackPoint,
-    stretch.midtone,
-    stretch.whitePoint,
+    renderStretch.blackPoint,
+    renderStretch.midtone,
+    renderStretch.whitePoint,
     fitsAutoStretch
   ]);
 
@@ -2042,6 +2058,11 @@ function AcquisitionTab({
       setFitsAutoStretch(true);
     } else {
       setStretch({
+        blackPoint: 600,
+        midtone: 1.45,
+        whitePoint: 42000
+      });
+      setRenderStretch({
         blackPoint: 600,
         midtone: 1.45,
         whitePoint: 42000
