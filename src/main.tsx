@@ -116,6 +116,7 @@ type AcquisitionEvent = {
 type DiagnosticStatus = 'pending' | 'ok' | 'warn' | 'error';
 type CoolingTask = '' | 'cooling' | 'warming';
 type AcquisitionMonitorTab = 'preview' | 'guiding' | 'stretch' | 'stats' | 'recent' | 'planned';
+type PipelineDetailTab = 'recent' | 'pending' | 'failed';
 
 type DiagnosticResult = {
   name: string;
@@ -1845,6 +1846,149 @@ function formatOptional(value: number | null | undefined) {
   return value === null || value === undefined ? '-' : value.toFixed(2);
 }
 
+function PipelinePanel({ pipelineState }: { pipelineState: AcquisitionPipelineState }) {
+  const [detailTab, setDetailTab] = useState<PipelineDetailTab>('recent');
+  const [copyMessage, setCopyMessage] = useState('');
+  const latest = pipelineState.history[0];
+  const agentStatus = pipelineState.health?.status || pipelineState.message;
+  const agentClass = pipelineState.failed.length
+    ? 'pipeline-state error'
+    : pipelineState.health?.status
+      ? 'pipeline-state ok'
+      : 'pipeline-state warn';
+  const latestDestination = latest?.destinationPath || '';
+
+  const copyLatestDestination = async () => {
+    if (!latestDestination) {
+      return;
+    }
+
+    try {
+      await navigator.clipboard.writeText(latestDestination);
+      setCopyMessage('Copied');
+      window.setTimeout(() => setCopyMessage(''), 1800);
+    } catch {
+      setCopyMessage('Copy failed');
+      window.setTimeout(() => setCopyMessage(''), 1800);
+    }
+  };
+
+  return (
+    <div className="pipeline-panel">
+      <div className="pipeline-strip">
+        <div className={agentClass}>
+          <span>Agent</span>
+          <strong>{agentStatus}</strong>
+        </div>
+        <div>
+          <span>Auto</span>
+          <strong>{pipelineState.autoTransfer ? 'On' : 'Off'}</strong>
+        </div>
+        <div>
+          <span>Pending</span>
+          <strong>{pipelineState.pending.length}</strong>
+        </div>
+        <div className={pipelineState.failed.length ? 'pipeline-state error' : undefined}>
+          <span>Failed</span>
+          <strong>{pipelineState.failed.length}</strong>
+        </div>
+        <div>
+          <span>Delivered</span>
+          <strong>{pipelineState.health?.deliveredFrames ?? '-'}</strong>
+        </div>
+        <div>
+          <span>Checked</span>
+          <strong>{pipelineState.checkedAt}</strong>
+        </div>
+      </div>
+
+      <div className="pipeline-destination">
+        <span>Latest destination</span>
+        <strong title={latestDestination || undefined}>{latestDestination || '-'}</strong>
+        <button type="button" disabled={!latestDestination} onClick={() => void copyLatestDestination()}>
+          {copyMessage || 'Copy'}
+        </button>
+      </div>
+
+      <div className="monitor-tabs pipeline-tabs">
+        {([
+          ['recent', `Recent ${pipelineState.history.length}`],
+          ['pending', `Pending ${pipelineState.pending.length}`],
+          ['failed', `Failed ${pipelineState.failed.length}`]
+        ] as const).map(([key, label]) => (
+          <button
+            className={detailTab === key ? 'monitor-tab active' : 'monitor-tab'}
+            key={key}
+            type="button"
+            onClick={() => setDetailTab(key)}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
+
+      {detailTab === 'recent' ? (
+        pipelineState.history.length ? (
+          <div className="frame-list compact-frame-list">
+            {pipelineState.history.map((item) => (
+              <div className="frame-row pipeline-history-row" key={`${item.id}-${item.transferredAt}`}>
+                <span>{item.transferredAt}</span>
+                <strong title={item.destinationPath}>{item.fileName}</strong>
+                <em>{formatBytes(item.sizeBytes)}</em>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <div className="empty-state">
+            <Save size={18} />
+            No transfer history yet.
+          </div>
+        )
+      ) : null}
+
+      {detailTab === 'pending' ? (
+        pipelineState.pending.length ? (
+          <div className="frame-list compact-frame-list">
+            {pipelineState.pending.slice(0, 8).map((frame) => (
+              <div className="frame-row pipeline-pending-row" key={frame.id}>
+                <span>{frame.imageType}</span>
+                <strong title={frame.sourcePath}>{frame.fileName}</strong>
+                <em>{formatBytes(frame.sizeBytes)}</em>
+              </div>
+            ))}
+            {pipelineState.pending.length > 8 ? <div className="frame-more">+{pipelineState.pending.length - 8} more pending</div> : null}
+          </div>
+        ) : (
+          <div className="empty-state">
+            <Save size={18} />
+            No pending frames.
+          </div>
+        )
+      ) : null}
+
+      {detailTab === 'failed' ? (
+        pipelineState.failed.length ? (
+          <div className="frame-list failed-frame-list compact-frame-list">
+            {pipelineState.failed.slice(0, 8).map((frame) => (
+              <div className="frame-row pipeline-failed-row" key={frame.id}>
+                <span>{frame.imageType}</span>
+                <strong title={frame.error || frame.sourcePath}>{frame.fileName}</strong>
+                <em>{frame.error || 'failed'}</em>
+              </div>
+            ))}
+            {pipelineState.failed.length > 8 ? <div className="frame-more">+{pipelineState.failed.length - 8} more failed</div> : null}
+          </div>
+        ) : (
+          <div className="empty-state">
+            <Save size={18} />
+            No failed transfers.
+          </div>
+        )
+      ) : null}
+    </div>
+  );
+}
+
 function AcquisitionTab({
   equipment,
   activeItem,
@@ -2654,35 +2798,7 @@ function AcquisitionTab({
       </Panel>
 
       <Panel title="Capture Pipeline" icon={<Save size={17} />}>
-        <DataTable
-          rows={[
-            ['Agent', pipelineState.health?.status || pipelineState.message],
-            ['NINA output', pipelineState.health?.ninaOutputRoot],
-            ['Auto transfer', pipelineState.autoTransfer ? 'Enabled' : 'Disabled'],
-            ['Pending transfer', pipelineState.pending.length],
-            ['Failed transfer', pipelineState.failed.length],
-            ['Delivered total', pipelineState.health?.deliveredFrames],
-            ['Last transfer', pipelineState.history[0]?.transferredAt || '-'],
-            ['Last file', pipelineState.history[0]?.fileName || '-'],
-            ['Last destination', pipelineState.history[0]?.destinationPath || '-'],
-            ['Last check', pipelineState.checkedAt]
-          ]}
-        />
-        {pipelineState.pending.length ? (
-          <div className="frame-list compact-frame-list">
-            {pipelineState.pending.slice(0, 3).map((frame) => (
-              <div className="frame-row" key={frame.id}>
-                <span>{frame.imageType}</span>
-                <strong>{frame.fileName}</strong>
-                <em>{formatBytes(frame.sizeBytes)}</em>
-              </div>
-            ))}
-            {pipelineState.pending.length > 3 ? <div className="frame-more">+{pipelineState.pending.length - 3} more pending</div> : null}
-          </div>
-        ) : null}
-        {pipelineState.failed.length ? (
-          <div className="inline-note warning-note">{pipelineState.failed.length} frame transfer{pipelineState.failed.length === 1 ? '' : 's'} need attention in Logs.</div>
-        ) : null}
+        <PipelinePanel pipelineState={pipelineState} />
       </Panel>
 
       <Panel title="Tonight Queue" icon={<ListTree size={17} />}>
