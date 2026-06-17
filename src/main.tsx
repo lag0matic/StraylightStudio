@@ -529,6 +529,46 @@ function formatTppaError(value: number | undefined) {
   return typeof value === 'number' && Number.isFinite(value) ? value.toFixed(2) : '-';
 }
 
+function autofocusStateClass(commandBusy: string, focuser: FocuserInfo | undefined, lastAutofocus: LastAutofocus | null, error: string) {
+  if (commandBusy === 'start-af' || focuser?.IsMoving) {
+    return 'focus-state running';
+  }
+
+  if (error) {
+    return 'focus-state error';
+  }
+
+  if (lastAutofocus) {
+    return 'focus-state complete';
+  }
+
+  return 'focus-state idle';
+}
+
+function autofocusStateText(commandBusy: string, focuser: FocuserInfo | undefined, lastAutofocus: LastAutofocus | null, error: string) {
+  if (commandBusy === 'start-af') {
+    return 'Starting';
+  }
+
+  if (commandBusy === 'cancel-af') {
+    return 'Canceling';
+  }
+
+  if (focuser?.IsMoving) {
+    return 'Moving';
+  }
+
+  if (error) {
+    return 'Failed';
+  }
+
+  if (lastAutofocus) {
+    return 'Complete';
+  }
+
+  return 'Idle';
+}
+
 function tppaStatusClass(workflow: TppaWorkflowState) {
   const text = `${workflow.step} ${workflow.status}`.toLowerCase();
 
@@ -1366,27 +1406,68 @@ function SetupTab({
       </Panel>
 
       <Panel title="Focus" icon={<Focus size={17} />}>
-        <DataTable
-          rows={[
-            ['Device', focuser?.DisplayName || focuser?.Name],
-            ['Position', focuser?.Position],
-            ['Moving', focuser?.IsMoving],
-            ['Temperature', focuser?.Temperature],
-            ['Last result', lastAutofocus ? 'Available' : lastAutofocusError || '-'],
-            ['Calculated point', lastAutofocus?.CalculatedFocusPoint],
-            ['Previous point', lastAutofocus?.PreviousFocusPoint],
-            ['Method', lastAutofocus?.Method]
-          ]}
-        />
-        <div className="button-row">
-          <button type="button" disabled={!focuser?.Connected || commandBusy !== ''} onClick={() => void runAutofocus(false)}>
-            <Focus size={16} />
-            Start AF
-          </button>
-          <button type="button" disabled={commandBusy !== ''} onClick={() => void runAutofocus(true)}>
-            <CircleStop size={16} />
-            Cancel AF
-          </button>
+        <div className="focus-panel">
+          <div className="focus-strip">
+            <div className={autofocusStateClass(commandBusy, focuser, lastAutofocus, lastAutofocusError)}>
+              <span>Autofocus</span>
+              <strong>{autofocusStateText(commandBusy, focuser, lastAutofocus, lastAutofocusError)}</strong>
+            </div>
+            <div>
+              <span>Focuser</span>
+              <strong>{focuser?.DisplayName || focuser?.Name || '-'}</strong>
+            </div>
+            <div>
+              <span>Position</span>
+              <strong>{formatValue(focuser?.Position)}</strong>
+            </div>
+            <div>
+              <span>Temperature</span>
+              <strong>{formatValue(focuser?.Temperature)}</strong>
+            </div>
+          </div>
+
+          <div className="focus-result-grid">
+            <div>
+              <span>Calculated</span>
+              <strong>{formatValue(lastAutofocus?.CalculatedFocusPoint)}</strong>
+            </div>
+            <div>
+              <span>Previous</span>
+              <strong>{formatValue(lastAutofocus?.PreviousFocusPoint)}</strong>
+            </div>
+            <div>
+              <span>Initial</span>
+              <strong>{formatValue(lastAutofocus?.InitialFocusPoint)}</strong>
+            </div>
+            <div>
+              <span>Method</span>
+              <strong>{lastAutofocus?.Method || lastAutofocus?.AutoFocuserName || '-'}</strong>
+            </div>
+          </div>
+
+          {lastAutofocusError ? <div className="focus-message error">{lastAutofocusError}</div> : null}
+          {lastAutofocus?.Duration ? <div className="focus-message">Last autofocus duration: {lastAutofocus.Duration}</div> : null}
+
+          <div className="button-row focus-command-row">
+            <button
+              className={commandBusy === 'start-af' ? 'focus-button active' : 'focus-button'}
+              type="button"
+              disabled={!focuser?.Connected || commandBusy !== ''}
+              onClick={() => void runAutofocus(false)}
+            >
+              <Focus size={16} />
+              {commandBusy === 'start-af' ? 'AF Running' : 'Start AF'}
+            </button>
+            <button
+              className={commandBusy === 'cancel-af' ? 'capture-button active' : 'capture-button'}
+              type="button"
+              disabled={commandBusy !== '' && commandBusy !== 'start-af'}
+              onClick={() => void runAutofocus(true)}
+            >
+              <CircleStop size={16} />
+              {commandBusy === 'cancel-af' ? 'Canceling AF' : 'Cancel AF'}
+            </button>
+          </div>
         </div>
       </Panel>
 
