@@ -370,6 +370,7 @@ const redcatFrame = {
 const plannerStorageKey = 'astro-planner-state-v1';
 const frameAgentStorageKey = 'astro-frame-agent-v1';
 const autoTransferStorageKey = 'astro-auto-transfer-enabled-v1';
+const autoTransferDefaultedStorageKey = 'astro-auto-transfer-defaulted-v2';
 const transferHistoryStorageKey = 'astro-transfer-history-v1';
 const defaultSequencePlan: SequencePlan = {
   imageType: 'Light',
@@ -399,6 +400,16 @@ const defaultSequenceRun: SequenceRunState = {
   startedAt: '-',
   completedAt: '-'
 };
+
+function loadAutoTransferEnabled() {
+  if (!settingsClient.loadBoolean(autoTransferDefaultedStorageKey)) {
+    settingsClient.saveBoolean(autoTransferStorageKey, true);
+    settingsClient.saveBoolean(autoTransferDefaultedStorageKey, true);
+    return true;
+  }
+
+  return settingsClient.loadBoolean(autoTransferStorageKey, true);
+}
 
 const demoEquipment: EquipmentInfo = {
   Camera: {
@@ -1840,7 +1851,7 @@ function AcquisitionTab({
     pending: [],
     failed: [],
     history: [],
-    autoTransfer: settingsClient.loadBoolean(autoTransferStorageKey),
+    autoTransfer: loadAutoTransferEnabled(),
     message: 'Not checked',
     checkedAt: '-'
   });
@@ -1889,7 +1900,7 @@ function AcquisitionTab({
       const agentBase = typeof storedAgent.base === 'string' ? storedAgent.base : frameTransferClient.defaultAgentBase;
       const storedHistory = settingsClient.loadJson(transferHistoryStorageKey, { items: [] as TransferHistoryItem[] });
       const history = Array.isArray(storedHistory.items) ? storedHistory.items.slice(0, 5) : [];
-      const autoTransfer = settingsClient.loadBoolean(autoTransferStorageKey);
+      const autoTransfer = loadAutoTransferEnabled();
 
       try {
         frameTransferClient.setAgentBase(agentBase);
@@ -2172,8 +2183,38 @@ function AcquisitionTab({
     }
   };
 
+  const runProgress = sequenceRun.totalFrames ? `${sequenceRun.currentFrame} / ${sequenceRun.totalFrames}` : '-';
+  const activeSummary = activeItem && plan
+    ? `${activeItem.target.name} | ${plan.imageType} | ${plan.frameCount} x ${plan.exposureSeconds}s`
+    : 'No active target';
+
   return (
-    <div className="tab-grid acquisition-grid">
+    <>
+      <section className="run-bar">
+        <div className="run-main">
+          <strong>{activeSummary}</strong>
+          <span>{sequenceRun.message}</span>
+        </div>
+        <div className="run-metrics">
+          <span>Frame {runProgress}</span>
+          <span>{camera?.CameraState || 'Camera unknown'}</span>
+          <span>{formatTemp(camera?.Temperature)}</span>
+          <span>Pending {pipelineState.pending.length}</span>
+          <span>Failed {pipelineState.failed.length}</span>
+          <span>{pipelineState.autoTransfer ? 'Auto-transfer on' : 'Auto-transfer off'}</span>
+        </div>
+        <button
+          className={sequenceRun.running ? 'capture-button active' : 'capture-button'}
+          type="button"
+          disabled={!activeItem || !camera?.Connected}
+          onClick={() => void runActivePlanCapture()}
+        >
+          {sequenceRun.running ? <CircleStop size={16} /> : <Play size={16} />}
+          {sequenceRun.running ? 'Abort Run' : 'Start Run'}
+        </button>
+      </section>
+
+      <div className="tab-grid acquisition-grid">
       <Panel title="Acquisition Monitor" icon={<Aperture size={17} />}>
         <div className="monitor-tabs">
           {[
@@ -2224,6 +2265,47 @@ function AcquisitionTab({
               <button type="button" onClick={() => setPreviewImage(null)} disabled={!previewImage}>
                 Clear
               </button>
+              <div className="preview-file-name">{previewImage?.name || pipelineState.history[0]?.fileName || 'Waiting for frame'}</div>
+            </div>
+            <div className="stretch-inline">
+              <label>
+                Black
+                <input
+                  type="range"
+                  min="0"
+                  max="20000"
+                  step="100"
+                  value={stretch.blackPoint}
+                  onChange={(event) => updateStretch('blackPoint', Number(event.target.value))}
+                />
+                <span>{stretch.blackPoint}</span>
+              </label>
+              <label>
+                Mid
+                <input
+                  type="range"
+                  min="0.5"
+                  max="3"
+                  step="0.05"
+                  value={stretch.midtone}
+                  onChange={(event) => updateStretch('midtone', Number(event.target.value))}
+                />
+                <span>{stretch.midtone.toFixed(2)}</span>
+              </label>
+              <label>
+                White
+                <input
+                  type="range"
+                  min="10000"
+                  max="65535"
+                  step="500"
+                  value={stretch.whitePoint}
+                  onChange={(event) => updateStretch('whitePoint', Number(event.target.value))}
+                />
+                <span>{stretch.whitePoint}</span>
+              </label>
+              <button type="button" onClick={setAutoStretch}>Auto</button>
+              <button type="button" onClick={() => setStretch(defaultStretch)}>Reset</button>
             </div>
           </>
         ) : null}
@@ -2336,6 +2418,10 @@ function AcquisitionTab({
             </div>
           )
         ) : null}
+      </Panel>
+
+      <Panel title="Guiding" icon={<Crosshair size={17} />}>
+        <GuidingPanel status={phdStatus} message={phdMessage} />
       </Panel>
 
       <Panel title="Test Exposure" icon={<Camera size={17} />}>
@@ -2504,7 +2590,8 @@ function AcquisitionTab({
           </div>
         )}
       </Panel>
-    </div>
+      </div>
+    </>
   );
 }
 
@@ -2540,7 +2627,7 @@ function LogsTab({
     const stored = settingsClient.loadJson(frameAgentStorageKey, { base: frameTransferClient.defaultAgentBase });
     return typeof stored.base === 'string' ? stored.base : frameTransferClient.defaultAgentBase;
   });
-  const [autoTransferEnabled, setAutoTransferEnabled] = useState(() => settingsClient.loadBoolean(autoTransferStorageKey));
+  const [autoTransferEnabled, setAutoTransferEnabled] = useState(() => loadAutoTransferEnabled());
   const [transferBusy, setTransferBusy] = useState(false);
   const [transferMessage, setTransferMessage] = useState('');
   const [transferRunAt, setTransferRunAt] = useState('');
