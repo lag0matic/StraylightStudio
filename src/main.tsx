@@ -248,6 +248,7 @@ type PersistedPlannerState = {
 type TppaSettings = {
   manualMode: boolean;
   startFromCurrentPosition: boolean;
+  directionEast: boolean;
   targetDistance: number;
   moveRate: number;
   exposureTime: number;
@@ -526,6 +527,37 @@ function formatTemp(value: unknown) {
 
 function formatTppaError(value: number | undefined) {
   return typeof value === 'number' && Number.isFinite(value) ? value.toFixed(2) : '-';
+}
+
+function tppaStatusClass(workflow: TppaWorkflowState) {
+  const text = `${workflow.step} ${workflow.status}`.toLowerCase();
+
+  if (workflow.socket === 'error' || text.includes('fail') || text.includes('error')) {
+    return 'tppa-state error';
+  }
+
+  if (text.includes('complete') || text.includes('done')) {
+    return 'tppa-state complete';
+  }
+
+  if (text.includes('solve') || text.includes('adjust') || text.includes('align') || workflow.socket === 'open') {
+    return 'tppa-state running';
+  }
+
+  return 'tppa-state idle';
+}
+
+function formatTppaMove(axis: 'azimuth' | 'altitude', value: number | undefined) {
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    return 'Waiting for solve';
+  }
+
+  const magnitude = Math.abs(value).toFixed(2);
+  if (axis === 'azimuth') {
+    return value >= 0 ? `Move right ${magnitude}` : `Move left ${magnitude}`;
+  }
+
+  return value >= 0 ? `Move up ${magnitude}` : `Move down ${magnitude}`;
 }
 
 function summarizeEnvelopeResponse(path: string, body: ApiEnvelope<unknown>) {
@@ -1359,96 +1391,128 @@ function SetupTab({
       </Panel>
 
       <Panel title="Three Point Polar Alignment" icon={<Crosshair size={17} />}>
-        <div className="tppa-summary">
-          <div>
-            <span>Azimuth Error</span>
-            <strong>{formatTppaError(tppaWorkflow.azimuthError)}</strong>
+        <div className="tppa-panel">
+          <div className="tppa-status-strip">
+            <div className={tppaStatusClass(tppaWorkflow)}>
+              <span>State</span>
+              <strong>{tppaWorkflow.step}</strong>
+            </div>
+            <div>
+              <span>Socket</span>
+              <strong>{tppaWorkflow.socket}</strong>
+            </div>
+            <div>
+              <span>Status</span>
+              <strong>{tppaWorkflow.status}</strong>
+            </div>
+            <div>
+              <span>Updated</span>
+              <strong>{tppaWorkflow.lastUpdated}</strong>
+            </div>
           </div>
-          <div>
-            <span>Altitude Error</span>
-            <strong>{formatTppaError(tppaWorkflow.altitudeError)}</strong>
+
+          <div className="tppa-adjust-grid">
+            <div>
+              <span>Azimuth error</span>
+              <strong>{formatTppaError(tppaWorkflow.azimuthError)}</strong>
+              <em>{formatTppaMove('azimuth', tppaWorkflow.azimuthError)}</em>
+            </div>
+            <div>
+              <span>Altitude error</span>
+              <strong>{formatTppaError(tppaWorkflow.altitudeError)}</strong>
+              <em>{formatTppaMove('altitude', tppaWorkflow.altitudeError)}</em>
+            </div>
+            <div>
+              <span>Total error</span>
+              <strong>{formatTppaError(tppaWorkflow.totalError)}</strong>
+              <em>{typeof tppaWorkflow.totalError === 'number' ? 'Reduce toward zero' : 'Waiting for solve'}</em>
+            </div>
           </div>
-          <div>
-            <span>Total Error</span>
-            <strong>{formatTppaError(tppaWorkflow.totalError)}</strong>
-          </div>
-        </div>
-        <DataTable
-          rows={[
-            ['Socket', tppaWorkflow.socket],
-            ['Step', tppaWorkflow.step],
-            ['Status', tppaWorkflow.status],
-            ['Updated', tppaWorkflow.lastUpdated]
-          ]}
-        />
-        <div className="tppa-instruction">
-          <Crosshair size={16} />
-          <span>{tppaWorkflow.instruction || 'Waiting for NINA TPPA adjustment instructions.'}</span>
-        </div>
-        <div className="form-grid">
-          <label>
-            Exposure
-            <input value={tppaSettings.exposureTime} type="number" min="0.1" step="0.1" onChange={(event) => setTppaNumber('exposureTime', event.target.value)} />
-          </label>
-          <label>
-            Gain
-            <input value={tppaSettings.gain} type="number" min="0" step="1" onChange={(event) => setTppaNumber('gain', event.target.value)} />
-          </label>
-          <label>
-            Offset
-            <input value={tppaSettings.offset} type="number" min="0" step="1" onChange={(event) => setTppaNumber('offset', event.target.value)} />
-          </label>
-          <label>
-            Binning
-            <input value={tppaSettings.binning} type="number" min="1" step="1" onChange={(event) => setTppaNumber('binning', event.target.value)} />
-          </label>
-          <label>
-            Target distance
-            <input value={tppaSettings.targetDistance} type="number" min="1" step="1" onChange={(event) => setTppaNumber('targetDistance', event.target.value)} />
-          </label>
-          <label>
-            Search radius
-            <input value={tppaSettings.searchRadius} type="number" min="0.1" step="0.1" onChange={(event) => setTppaNumber('searchRadius', event.target.value)} />
-          </label>
-        </div>
-        <div className="check-row">
-          <label>
-            <input
-              checked={tppaSettings.startFromCurrentPosition}
-              type="checkbox"
-              onChange={(event) => setTppaSettings((current) => ({ ...current, startFromCurrentPosition: event.target.checked }))}
-            />
-            Start from current position
-          </label>
-          <label>
-            <input
-              checked={tppaSettings.manualMode}
-              type="checkbox"
-              onChange={(event) => setTppaSettings((current) => ({ ...current, manualMode: event.target.checked }))}
-            />
-            Manual mode
-          </label>
-        </div>
-        <div className="button-row">
-          <button type="button" disabled={!mount?.Connected || !camera?.Connected || commandBusy !== ''} onClick={() => void runTppa('start-alignment')}>
+
+          <div className="tppa-instruction">
             <Crosshair size={16} />
-            Start TPPA
-          </button>
-          <button type="button" disabled={commandBusy !== ''} onClick={() => void runTppa('pause-alignment')}>Pause</button>
-          <button type="button" disabled={commandBusy !== ''} onClick={() => void runTppa('resume-alignment')}>Resume</button>
-          <button type="button" disabled={commandBusy !== ''} onClick={() => void runTppa('stop-alignment')}>Stop</button>
-        </div>
-        {tppaWorkflow.rawEvents.length ? (
-          <div className="tppa-event-list">
-            {tppaWorkflow.rawEvents.slice(0, 5).map((event) => (
-              <div className="tppa-event-row" key={event.id}>
-                <time>{event.receivedAt}</time>
-                <strong>{event.event}</strong>
-                <span>{event.detail}</span>
-              </div>
-            ))}
+            <span>{tppaWorkflow.instruction || 'Waiting for NINA TPPA adjustment instructions.'}</span>
           </div>
-        ) : null}
+
+          <div className="tppa-settings-grid">
+            <label>
+              Exposure
+              <input value={tppaSettings.exposureTime} type="number" min="0.1" step="0.1" onChange={(event) => setTppaNumber('exposureTime', event.target.value)} />
+            </label>
+            <label>
+              Binning
+              <input value={tppaSettings.binning} type="number" min="1" step="1" onChange={(event) => setTppaNumber('binning', event.target.value)} />
+            </label>
+            <label>
+              Gain
+              <input value={tppaSettings.gain} type="number" min="0" step="1" onChange={(event) => setTppaNumber('gain', event.target.value)} />
+            </label>
+            <label>
+              Offset
+              <input value={tppaSettings.offset} type="number" min="0" step="1" onChange={(event) => setTppaNumber('offset', event.target.value)} />
+            </label>
+            <label>
+              Point distance
+              <input value={tppaSettings.targetDistance} type="number" min="1" step="1" onChange={(event) => setTppaNumber('targetDistance', event.target.value)} />
+            </label>
+            <label>
+              Move rate
+              <input value={tppaSettings.moveRate} type="number" min="0.1" step="0.1" onChange={(event) => setTppaNumber('moveRate', event.target.value)} />
+            </label>
+            <label>
+              Solver radius
+              <input value={tppaSettings.searchRadius} type="number" min="0.1" step="0.1" onChange={(event) => setTppaNumber('searchRadius', event.target.value)} />
+            </label>
+            <label>
+              Direction
+              <select value={tppaSettings.directionEast ? 'east' : 'west'} onChange={(event) => setTppaSettings((current) => ({ ...current, directionEast: event.target.value === 'east' }))}>
+                <option value="east">East</option>
+                <option value="west">West</option>
+              </select>
+            </label>
+          </div>
+
+          <div className="tppa-toggle-row">
+            <label>
+              <input
+                checked={tppaSettings.startFromCurrentPosition}
+                type="checkbox"
+                onChange={(event) => setTppaSettings((current) => ({ ...current, startFromCurrentPosition: event.target.checked }))}
+              />
+              Start from current position
+            </label>
+            <label>
+              <input
+                checked={tppaSettings.manualMode}
+                type="checkbox"
+                onChange={(event) => setTppaSettings((current) => ({ ...current, manualMode: event.target.checked }))}
+              />
+              Manual mode
+            </label>
+          </div>
+
+          <div className="button-row tppa-command-row">
+            <button type="button" disabled={!mount?.Connected || !camera?.Connected || commandBusy !== ''} onClick={() => void runTppa('start-alignment')}>
+              <Crosshair size={16} />
+              Start TPPA
+            </button>
+            <button type="button" disabled={commandBusy !== ''} onClick={() => void runTppa('pause-alignment')}>Pause</button>
+            <button type="button" disabled={commandBusy !== ''} onClick={() => void runTppa('resume-alignment')}>Resume</button>
+            <button type="button" disabled={commandBusy !== ''} onClick={() => void runTppa('stop-alignment')}>Stop</button>
+          </div>
+
+          {tppaWorkflow.rawEvents.length ? (
+            <div className="tppa-event-list">
+              {tppaWorkflow.rawEvents.slice(0, 5).map((event) => (
+                <div className="tppa-event-row" key={event.id}>
+                  <time>{event.receivedAt}</time>
+                  <strong>{event.event}</strong>
+                  <span>{event.detail}</span>
+                </div>
+              ))}
+            </div>
+          ) : null}
+        </div>
       </Panel>
 
       <Panel title="Mount and Guide" icon={<Telescope size={17} />}>
@@ -3426,6 +3490,7 @@ function App() {
   const [tppaSettings, setTppaSettings] = useState<TppaSettings>({
     manualMode: false,
     startFromCurrentPosition: true,
+    directionEast: true,
     targetDistance: 10,
     moveRate: 4,
     exposureTime: 2,

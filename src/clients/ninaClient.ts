@@ -9,6 +9,7 @@ export type ApiEnvelope<T> = {
 export type TppaCommandSettings = {
   manualMode: boolean;
   startFromCurrentPosition: boolean;
+  directionEast: boolean;
   targetDistance: number;
   moveRate: number;
   exposureTime: number;
@@ -82,6 +83,7 @@ function sendTppaCommand(action: string, settings: TppaCommandSettings) {
         Action: action,
         ManualMode: settings.manualMode,
         StartFromCurrentPosition: settings.startFromCurrentPosition,
+        DirectionEast: settings.directionEast,
         TargetDistance: settings.targetDistance,
         MoveRate: settings.moveRate,
         ExposureTime: settings.exposureTime,
