@@ -39,6 +39,13 @@ export type WriteFrameResult = {
   manifest_path: string;
 };
 
+export type RenderFitsPreviewResult = {
+  data_url: string;
+  width: number;
+  height: number;
+  source_path: string;
+};
+
 function monthToken(date: Date) {
   return date.toLocaleString('en-US', { month: 'short' }).toLowerCase();
 }
@@ -173,6 +180,18 @@ async function writeFrame(request: WriteFrameRequest) {
   });
 }
 
+async function renderFitsPreview(path: string, stretch: { blackPoint: number; midtone: number; whitePoint: number }) {
+  return tauriClient.invokeIfDesktop<RenderFitsPreviewResult>('render_fits_preview', {
+    request: {
+      path,
+      max_size: 1400,
+      black_point: stretch.blackPoint,
+      midtone: stretch.midtone,
+      white_point: stretch.whitePoint
+    }
+  });
+}
+
 export const storageClient = {
   sessionFolder,
   framePath,
@@ -188,5 +207,6 @@ export const storageClient = {
   chooseSessionRoot,
   previewFramePath,
   prepareSessionFolder,
-  writeFrame
+  writeFrame,
+  renderFitsPreview
 };

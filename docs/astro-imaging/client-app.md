@@ -41,6 +41,7 @@ The long-term runtime target is a Tauri desktop app for Windows and Linux. The c
 - Shows the active queued plan in the Acquisition tab with planned target, exposure, frame count, integration, estimated duration, and saved-capture run progress.
 - Loads a local PNG/JPEG/WebP preview image in the Acquisition tab for offline inspection.
 - Applies display-only preview stretch controls without modifying source image data.
+- Renders the latest transferred local FITS frame through a desktop FITS preview adapter when running in Tauri.
 - Shows basic loaded-image metadata plus placeholders for future FITS-derived quality stats.
 - Generates the planned FITS frame list from the active queued plan.
 - Persists planner state through the settings adapter: active tab, imported target, sequence settings, Tonight queue, and active queue item.

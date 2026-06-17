@@ -206,6 +206,8 @@ type PreviewImage = {
   dataUrl: string;
   width?: number;
   height?: number;
+  sourcePath?: string;
+  sourceKind?: 'bitmap' | 'fits';
 };
 
 type CaptureStats = {
@@ -1947,6 +1949,54 @@ function AcquisitionTab({
     };
   }, []);
 
+  useEffect(() => {
+    const latestFrame = pipelineState.history[0];
+
+    if (!latestFrame?.destinationPath || !latestFrame.fileName.toLowerCase().match(/\.fits?$/)) {
+      return undefined;
+    }
+
+    let cancelled = false;
+
+    const renderLatestFits = async () => {
+      try {
+        const preview = await storageClient.renderFitsPreview(latestFrame.destinationPath, stretch);
+
+        if (!preview || cancelled) {
+          return;
+        }
+
+        setPreviewImage({
+          name: latestFrame.fileName,
+          sizeBytes: latestFrame.sizeBytes,
+          type: 'image/bmp',
+          dataUrl: preview.data_url,
+          width: preview.width,
+          height: preview.height,
+          sourcePath: preview.source_path,
+          sourceKind: 'fits'
+        });
+      } catch (caught) {
+        if (!cancelled) {
+          setCaptureMessage(caught instanceof Error ? caught.message : 'Unable to render FITS preview.');
+        }
+      }
+    };
+
+    void renderLatestFits();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    pipelineState.history[0]?.destinationPath,
+    pipelineState.history[0]?.fileName,
+    pipelineState.history[0]?.sizeBytes,
+    stretch.blackPoint,
+    stretch.midtone,
+    stretch.whitePoint
+  ]);
+
   const handlePreviewFile = (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
 
@@ -1964,7 +2014,8 @@ function AcquisitionTab({
         name: file.name,
         sizeBytes: file.size,
         type: file.type || 'image',
-        dataUrl: reader.result
+        dataUrl: reader.result,
+        sourceKind: 'bitmap'
       });
     };
     reader.readAsDataURL(file);
@@ -2053,7 +2104,8 @@ function AcquisitionTab({
         name: `test-exposure-${capturedAt}.png`,
         sizeBytes: blob.size,
         type: blob.type || 'image/png',
-        dataUrl
+        dataUrl,
+        sourceKind: 'bitmap'
       });
       setCaptureMessage('Preview exposure complete.');
 
@@ -2243,7 +2295,7 @@ function AcquisitionTab({
                 <img
                   alt={previewImage.name}
                   src={previewImage.dataUrl}
-                  style={{ filter: stretchFilter(stretch) }}
+                  style={{ filter: previewImage.sourceKind === 'fits' ? 'none' : stretchFilter(stretch) }}
                   onLoad={(event) => {
                     const image = event.currentTarget;
                     setPreviewImage((current) =>
