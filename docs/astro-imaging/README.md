@@ -53,6 +53,7 @@ Once this spine works, the hardware operations can be added one at a time.
 
 - [Architecture](architecture.md): system boundaries and service responsibilities.
 - [Client App](client-app.md): current local web client and run commands.
+- [Acquisition UI Redesign](acquisition-ui-redesign.md): next console layout for live capture, preview, guiding, transfer, and plan details.
 - [Desktop Runtime](desktop-runtime.md): Tauri migration path and frontend/backend adapter boundaries.
 - [Frame Transfer Protocol](frame-transfer-protocol.md): miniPC agent endpoints and checksum delivery flow.
 - [Current Integration State](current-integration-state.md): live miniPC/API facts discovered during setup.
