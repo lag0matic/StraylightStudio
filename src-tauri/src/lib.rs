@@ -43,6 +43,7 @@ struct WriteFrameRequest {
 struct FitsPreviewRequest {
     path: String,
     max_size: Option<u32>,
+    auto_stretch: Option<bool>,
     black_point: Option<f64>,
     midtone: Option<f64>,
     white_point: Option<f64>,
@@ -79,6 +80,9 @@ struct FitsPreviewResult {
     width: u32,
     height: u32,
     source_path: String,
+    black_point: f64,
+    midtone: f64,
+    white_point: f64,
 }
 
 #[derive(Debug)]
@@ -358,6 +362,38 @@ fn bmp_data_url_from_gray(width: u32, height: u32, pixels: &[u8]) -> Result<Stri
     ))
 }
 
+fn percentile(sorted_values: &[f64], percent: f64) -> Option<f64> {
+    if sorted_values.is_empty() {
+        return None;
+    }
+
+    let clamped = percent.clamp(0.0, 1.0);
+    let index = ((sorted_values.len() - 1) as f64 * clamped).round() as usize;
+    sorted_values.get(index).copied()
+}
+
+fn auto_stretch_bounds(values: &[f64]) -> (f64, f64) {
+    let mut finite_values = values
+        .iter()
+        .copied()
+        .filter(|value| value.is_finite())
+        .collect::<Vec<_>>();
+
+    if finite_values.is_empty() {
+        return (0.0, 65535.0);
+    }
+
+    finite_values.sort_by(|left, right| left.total_cmp(right));
+    let low = percentile(&finite_values, 0.01).unwrap_or(0.0);
+    let high = percentile(&finite_values, 0.995).unwrap_or(low + 1.0);
+
+    if high <= low {
+        (low, low + 1.0)
+    } else {
+        (low, high)
+    }
+}
+
 fn render_fits_to_preview(
     bytes: &[u8],
     request: &FitsPreviewRequest,
@@ -380,28 +416,43 @@ fn render_fits_to_preview(
     let data = bytes
         .get(header.data_offset..)
         .ok_or_else(|| "FITS data section is missing".to_string())?;
-    let black = request.black_point.unwrap_or(0.0);
-    let white = request.white_point.unwrap_or(65535.0).max(black + 1.0);
-    let midtone = request.midtone.unwrap_or(1.0).clamp(0.05, 8.0);
-    let gamma = 1.0 / midtone;
-    let mut pixels = Vec::with_capacity(width * height);
+    let use_auto_stretch = request.auto_stretch.unwrap_or(false);
+    let mut sampled_values = Vec::with_capacity(width * height);
 
     for y in 0..height {
         let source_y = ((y as f64 / scale).floor() as usize).min(source_height - 1);
         for x in 0..width {
             let source_x = ((x as f64 / scale).floor() as usize).min(source_width - 1);
-            let value = read_fits_value(
+            sampled_values.push(read_fits_value(
                 data,
                 bitpix,
                 source_y * source_width + source_x,
                 bzero,
                 bscale,
-            )?;
-            let normalized = ((value - black) / (white - black))
-                .clamp(0.0, 1.0)
-                .powf(gamma);
-            pixels.push((normalized * 255.0).round() as u8);
+            )?);
         }
+    }
+
+    let (auto_black, auto_white) = auto_stretch_bounds(&sampled_values);
+    let black = if use_auto_stretch {
+        auto_black
+    } else {
+        request.black_point.unwrap_or(auto_black)
+    };
+    let white = if use_auto_stretch {
+        auto_white
+    } else {
+        request.white_point.unwrap_or(auto_white).max(black + 1.0)
+    };
+    let midtone = request.midtone.unwrap_or(1.0).clamp(0.05, 8.0);
+    let gamma = 1.0 / midtone;
+    let mut pixels = Vec::with_capacity(width * height);
+
+    for value in sampled_values {
+        let normalized = ((value - black) / (white - black))
+            .clamp(0.0, 1.0)
+            .powf(gamma);
+        pixels.push((normalized * 255.0).round() as u8);
     }
 
     Ok(FitsPreviewResult {
@@ -409,6 +460,9 @@ fn render_fits_to_preview(
         width: width as u32,
         height: height as u32,
         source_path: request.path.clone(),
+        black_point: black,
+        midtone,
+        white_point: white,
     })
 }
 
@@ -749,6 +803,7 @@ mod tests {
             &FitsPreviewRequest {
                 path: "test.fits".to_string(),
                 max_size: Some(100),
+                auto_stretch: Some(false),
                 black_point: Some(0.0),
                 midtone: Some(1.0),
                 white_point: Some(65535.0),
@@ -758,6 +813,8 @@ mod tests {
 
         assert_eq!(preview.width, 2);
         assert_eq!(preview.height, 1);
+        assert_eq!(preview.black_point, 0.0);
+        assert_eq!(preview.white_point, 65535.0);
         assert!(preview.data_url.starts_with("data:image/bmp;base64,"));
     }
 }

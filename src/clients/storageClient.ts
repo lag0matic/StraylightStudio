@@ -44,6 +44,9 @@ export type RenderFitsPreviewResult = {
   width: number;
   height: number;
   source_path: string;
+  black_point: number;
+  midtone: number;
+  white_point: number;
 };
 
 function monthToken(date: Date) {
@@ -180,11 +183,12 @@ async function writeFrame(request: WriteFrameRequest) {
   });
 }
 
-async function renderFitsPreview(path: string, stretch: { blackPoint: number; midtone: number; whitePoint: number }) {
+async function renderFitsPreview(path: string, stretch: { blackPoint: number; midtone: number; whitePoint: number }, autoStretch: boolean) {
   return tauriClient.invokeIfDesktop<RenderFitsPreviewResult>('render_fits_preview', {
     request: {
       path,
       max_size: 1400,
+      auto_stretch: autoStretch,
       black_point: stretch.blackPoint,
       midtone: stretch.midtone,
       white_point: stretch.whitePoint

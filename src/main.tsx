@@ -1838,6 +1838,7 @@ function AcquisitionTab({
   const estimatedDuration = plan ? totalIntegration + (plan.autofocusBeforeRun ? 180 : 0) + (plan.guidingRequired ? 90 : 0) : 0;
   const [previewImage, setPreviewImage] = useState<PreviewImage | null>(null);
   const [stretch, setStretch] = useState<StretchSettings>(defaultStretch);
+  const [fitsAutoStretch, setFitsAutoStretch] = useState(true);
   const [testExposureSeconds, setTestExposureSeconds] = useState(1);
   const [testExposureGain, setTestExposureGain] = useState(camera?.Gain ?? 200);
   const [testExposureType, setTestExposureType] = useState('SNAPSHOT');
@@ -1960,10 +1961,18 @@ function AcquisitionTab({
 
     const renderLatestFits = async () => {
       try {
-        const preview = await storageClient.renderFitsPreview(latestFrame.destinationPath, stretch);
+        const preview = await storageClient.renderFitsPreview(latestFrame.destinationPath, stretch, fitsAutoStretch);
 
         if (!preview || cancelled) {
           return;
+        }
+
+        if (fitsAutoStretch) {
+          setStretch({
+            blackPoint: Math.max(0, Math.round(preview.black_point)),
+            midtone: Number(preview.midtone.toFixed(2)),
+            whitePoint: Math.max(1, Math.round(preview.white_point))
+          });
         }
 
         setPreviewImage({
@@ -1994,7 +2003,8 @@ function AcquisitionTab({
     pipelineState.history[0]?.sizeBytes,
     stretch.blackPoint,
     stretch.midtone,
-    stretch.whitePoint
+    stretch.whitePoint,
+    fitsAutoStretch
   ]);
 
   const handlePreviewFile = (event: ChangeEvent<HTMLInputElement>) => {
@@ -2017,20 +2027,26 @@ function AcquisitionTab({
         dataUrl: reader.result,
         sourceKind: 'bitmap'
       });
+      setFitsAutoStretch(false);
     };
     reader.readAsDataURL(file);
   };
 
   const updateStretch = (key: keyof StretchSettings, value: number) => {
+    setFitsAutoStretch(false);
     setStretch((current) => ({ ...current, [key]: value }));
   };
 
   const setAutoStretch = () => {
-    setStretch({
-      blackPoint: 600,
-      midtone: 1.45,
-      whitePoint: 42000
-    });
+    if (previewImage?.sourceKind === 'fits') {
+      setFitsAutoStretch(true);
+    } else {
+      setStretch({
+        blackPoint: 600,
+        midtone: 1.45,
+        whitePoint: 42000
+      });
+    }
   };
 
   const runTestExposure = async () => {
@@ -2107,6 +2123,7 @@ function AcquisitionTab({
         dataUrl,
         sourceKind: 'bitmap'
       });
+      setFitsAutoStretch(false);
       setCaptureMessage('Preview exposure complete.');
 
       for (let attempt = 0; attempt < 5; attempt += 1) {
@@ -2325,8 +2342,8 @@ function AcquisitionTab({
                 <input
                   type="range"
                   min="0"
-                  max="20000"
-                  step="100"
+                  max="5000"
+                  step="10"
                   value={stretch.blackPoint}
                   onChange={(event) => updateStretch('blackPoint', Number(event.target.value))}
                 />
@@ -2348,9 +2365,9 @@ function AcquisitionTab({
                 White
                 <input
                   type="range"
-                  min="10000"
+                  min="100"
                   max="65535"
-                  step="500"
+                  step="10"
                   value={stretch.whitePoint}
                   onChange={(event) => updateStretch('whitePoint', Number(event.target.value))}
                 />
@@ -2374,8 +2391,8 @@ function AcquisitionTab({
                 <input
                   type="range"
                   min="0"
-                  max="20000"
-                  step="100"
+                  max="5000"
+                  step="10"
                   value={stretch.blackPoint}
                   onChange={(event) => updateStretch('blackPoint', Number(event.target.value))}
                 />
@@ -2397,9 +2414,9 @@ function AcquisitionTab({
                 White point
                 <input
                   type="range"
-                  min="10000"
+                  min="100"
                   max="65535"
-                  step="500"
+                  step="10"
                   value={stretch.whitePoint}
                   onChange={(event) => updateStretch('whitePoint', Number(event.target.value))}
                 />
