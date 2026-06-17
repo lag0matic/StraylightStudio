@@ -372,6 +372,10 @@ h2 {
   font-size: 12px;
 }
 
+.warning-note {
+  color: #e4c27b;
+}
+
 .form-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));

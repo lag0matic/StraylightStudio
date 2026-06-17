@@ -149,6 +149,16 @@ type TransferHistoryItem = {
   sha256: string;
 };
 
+type AcquisitionPipelineState = {
+  health: AgentHealth | null;
+  pending: AgentFrame[];
+  failed: AgentFrame[];
+  history: TransferHistoryItem[];
+  autoTransfer: boolean;
+  message: string;
+  checkedAt: string;
+};
+
 type TabKey = 'setup' | 'targeting' | 'acquisition' | 'logs';
 type ConnectionStatus = 'checking' | 'online' | 'offline' | 'demo';
 
@@ -1825,6 +1835,15 @@ function AcquisitionTab({
   const [phdStatus, setPhdStatus] = useState<Phd2Status | null>(null);
   const [phdMessage, setPhdMessage] = useState('');
   const [sequenceRun, setSequenceRun] = useState<SequenceRunState>(defaultSequenceRun);
+  const [pipelineState, setPipelineState] = useState<AcquisitionPipelineState>({
+    health: null,
+    pending: [],
+    failed: [],
+    history: [],
+    autoTransfer: settingsClient.loadBoolean(autoTransferStorageKey),
+    message: 'Not checked',
+    checkedAt: '-'
+  });
   const sequenceAbortRef = useRef(false);
   const plannedFrames = useMemo(() => {
     if (!activeItem || !plan) {
@@ -1855,6 +1874,61 @@ function AcquisitionTab({
 
     void pollPhd();
     const intervalId = window.setInterval(() => void pollPhd(), 2000);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(intervalId);
+    };
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const refreshPipelineState = async () => {
+      const storedAgent = settingsClient.loadJson(frameAgentStorageKey, { base: frameTransferClient.defaultAgentBase });
+      const agentBase = typeof storedAgent.base === 'string' ? storedAgent.base : frameTransferClient.defaultAgentBase;
+      const storedHistory = settingsClient.loadJson(transferHistoryStorageKey, { items: [] as TransferHistoryItem[] });
+      const history = Array.isArray(storedHistory.items) ? storedHistory.items.slice(0, 5) : [];
+      const autoTransfer = settingsClient.loadBoolean(autoTransferStorageKey);
+
+      try {
+        frameTransferClient.setAgentBase(agentBase);
+        const [health, pending, failed] = await Promise.all([
+          frameTransferClient.getHealth(),
+          frameTransferClient.getPendingFrames(),
+          frameTransferClient.getFailedFrames()
+        ]);
+
+        if (cancelled) {
+          return;
+        }
+
+        setPipelineState({
+          health,
+          pending,
+          failed,
+          history,
+          autoTransfer,
+          message: 'Agent reachable',
+          checkedAt: new Date().toLocaleTimeString()
+        });
+      } catch (caught) {
+        if (cancelled) {
+          return;
+        }
+
+        setPipelineState((current) => ({
+          ...current,
+          history,
+          autoTransfer,
+          message: caught instanceof Error ? caught.message : 'Unable to reach Starrunner Agent.',
+          checkedAt: new Date().toLocaleTimeString()
+        }));
+      }
+    };
+
+    void refreshPipelineState();
+    const intervalId = window.setInterval(() => void refreshPipelineState(), 5000);
 
     return () => {
       cancelled = true;
@@ -2368,10 +2442,43 @@ function AcquisitionTab({
             ['Last frame', previewImage?.name ?? '-'],
             ['Preview capture', captureRunning ? 'Running' : captureMessage || '-'],
             ['Captured frames', sequenceRun.totalFrames ? sequenceRun.currentFrame : '0'],
-            ['Delivered frames', '-'],
-            ['Rejected frames', '-']
+            ['Agent pending', pipelineState.pending.length],
+            ['Delivered frames', pipelineState.health?.deliveredFrames],
+            ['Failed transfers', pipelineState.failed.length]
           ]}
         />
+      </Panel>
+
+      <Panel title="Capture Pipeline" icon={<Save size={17} />}>
+        <DataTable
+          rows={[
+            ['Agent', pipelineState.health?.status || pipelineState.message],
+            ['NINA output', pipelineState.health?.ninaOutputRoot],
+            ['Auto transfer', pipelineState.autoTransfer ? 'Enabled' : 'Disabled'],
+            ['Pending transfer', pipelineState.pending.length],
+            ['Failed transfer', pipelineState.failed.length],
+            ['Delivered total', pipelineState.health?.deliveredFrames],
+            ['Last transfer', pipelineState.history[0]?.transferredAt || '-'],
+            ['Last file', pipelineState.history[0]?.fileName || '-'],
+            ['Last destination', pipelineState.history[0]?.destinationPath || '-'],
+            ['Last check', pipelineState.checkedAt]
+          ]}
+        />
+        {pipelineState.pending.length ? (
+          <div className="frame-list compact-frame-list">
+            {pipelineState.pending.slice(0, 3).map((frame) => (
+              <div className="frame-row" key={frame.id}>
+                <span>{frame.imageType}</span>
+                <strong>{frame.fileName}</strong>
+                <em>{formatBytes(frame.sizeBytes)}</em>
+              </div>
+            ))}
+            {pipelineState.pending.length > 3 ? <div className="frame-more">+{pipelineState.pending.length - 3} more pending</div> : null}
+          </div>
+        ) : null}
+        {pipelineState.failed.length ? (
+          <div className="inline-note warning-note">{pipelineState.failed.length} frame transfer{pipelineState.failed.length === 1 ? '' : 's'} need attention in Logs.</div>
+        ) : null}
       </Panel>
 
       <Panel title="Tonight Queue" icon={<ListTree size={17} />}>
