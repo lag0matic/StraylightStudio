@@ -2408,6 +2408,7 @@ function AcquisitionTab({
     checkedAt: '-'
   });
   const sequenceAbortRef = useRef(false);
+  const previewRenderIdRef = useRef(0);
   const plannedFrames = useMemo(() => {
     if (!activeItem || !plan) {
       return [];
@@ -2422,14 +2423,28 @@ function AcquisitionTab({
   }, []);
 
   const renderFitsPath = useCallback(async (path: string, name?: string, sizeBytes = 0) => {
+    const renderId = previewRenderIdRef.current + 1;
+    previewRenderIdRef.current = renderId;
     setPreviewRendering(true);
     setCaptureMessage('Rendering FITS preview...');
 
     try {
-      const preview = await storageClient.renderFitsPreview(path, renderStretch, fitsAutoStretch);
+      const timeout = new Promise<null>((resolve) => {
+        window.setTimeout(() => resolve(null), 45000);
+      });
+      const preview = await Promise.race([
+        storageClient.renderFitsPreview(path, renderStretch, fitsAutoStretch),
+        timeout
+      ]);
 
       if (!preview) {
-        throw new Error('FITS preview rendering is available in the desktop app.');
+        throw new Error(tauriClient.isDesktopRuntime()
+          ? 'FITS preview rendering timed out.'
+          : 'FITS preview rendering is available in the desktop app.');
+      }
+
+      if (previewRenderIdRef.current !== renderId) {
+        return;
       }
 
       if (fitsAutoStretch) {
@@ -2452,11 +2467,21 @@ function AcquisitionTab({
       });
       setCaptureMessage('FITS preview rendered.');
     } catch (caught) {
-      setCaptureMessage(caught instanceof Error ? caught.message : 'Unable to render FITS preview.');
+      if (previewRenderIdRef.current === renderId) {
+        setCaptureMessage(caught instanceof Error ? caught.message : 'Unable to render FITS preview.');
+      }
     } finally {
-      setPreviewRendering(false);
+      if (previewRenderIdRef.current === renderId) {
+        setPreviewRendering(false);
+      }
     }
   }, [fitsAutoStretch, renderStretch]);
+
+  const cancelPreviewRender = () => {
+    previewRenderIdRef.current += 1;
+    setPreviewRendering(false);
+    setCaptureMessage('FITS preview render canceled.');
+  };
 
   useEffect(() => {
     settingsClient.saveJson(acquisitionWorkspaceStorageKey, {
@@ -2604,8 +2629,34 @@ function AcquisitionTab({
   }, [
     pipelineState.history[0]?.destinationPath,
     pipelineState.history[0]?.fileName,
-    pipelineState.history[0]?.sizeBytes,
-    renderFitsPath
+    pipelineState.history[0]?.sizeBytes
+  ]);
+
+  useEffect(() => {
+    if (!tauriClient.isDesktopRuntime() || fitsAutoStretch || previewImage?.sourceKind !== 'fits' || !previewImage.sourcePath) {
+      return undefined;
+    }
+
+    let cancelled = false;
+    const timeoutId = window.setTimeout(() => {
+      if (!cancelled) {
+        void renderFitsPath(previewImage.sourcePath!, previewImage.name, previewImage.sizeBytes);
+      }
+    }, 80);
+
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timeoutId);
+    };
+  }, [
+    fitsAutoStretch,
+    previewImage?.sourceKind,
+    previewImage?.sourcePath,
+    previewImage?.name,
+    previewImage?.sizeBytes,
+    renderStretch.blackPoint,
+    renderStretch.midtone,
+    renderStretch.whitePoint
   ]);
 
   const loadBitmapPreviewFile = (file: File) => {
@@ -3053,19 +3104,24 @@ function AcquisitionTab({
                   <div>{previewDragActive ? 'Drop image to preview' : 'No frame loaded'}</div>
                 )}
               </div>
-              {previewRendering ? <div className="preview-rendering">Rendering FITS...</div> : null}
+              {previewRendering ? (
+                <div className="preview-rendering">
+                  <span>Rendering FITS...</span>
+                  <button type="button" onClick={cancelPreviewRender}>Cancel</button>
+                </div>
+              ) : null}
             </div>
             <div className="preview-toolbar">
               <label className="file-button">
                 Load Preview Image
                 <input type="file" accept="image/png,image/jpeg,image/webp,image/bmp,.fits,.fit,.fts" onChange={handlePreviewFile} />
               </label>
-              <button type="button" disabled={previewRendering || !tauriClient.isDesktopRuntime()} onClick={() => void chooseFitsPreview()}>
+              <button type="button" disabled={!tauriClient.isDesktopRuntime()} onClick={() => void chooseFitsPreview()}>
                 Open FITS
               </button>
               <button
                 type="button"
-                disabled={previewRendering || !pipelineState.history[0]?.destinationPath || !tauriClient.isDesktopRuntime()}
+                disabled={!pipelineState.history[0]?.destinationPath || !tauriClient.isDesktopRuntime()}
                 onClick={() => void reloadLatestPreview()}
               >
                 Reload Latest
