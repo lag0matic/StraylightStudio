@@ -119,6 +119,7 @@ type DiagnosticStatus = 'pending' | 'ok' | 'warn' | 'error';
 type CoolingTask = '' | 'cooling' | 'warming';
 type AcquisitionMonitorTab = 'stats' | 'recent' | 'planned' | 'pipeline';
 type AcquisitionPanelKey = 'guiding' | 'testExposure' | 'queue' | 'details';
+type PreviewZoomMode = 'fit' | 'manual';
 type PipelineDetailTab = 'recent' | 'pending' | 'failed';
 
 type DiagnosticResult = {
@@ -133,6 +134,8 @@ type AcquisitionWorkspaceState = {
   collapsedPanels: Record<AcquisitionPanelKey, boolean>;
   stretch: StretchSettings;
   fitsAutoStretch: boolean;
+  previewZoomMode: PreviewZoomMode;
+  previewZoom: number;
 };
 
 type CapabilityProbe = {
@@ -418,7 +421,9 @@ const defaultAcquisitionWorkspace: AcquisitionWorkspaceState = {
   monitorTab: 'stats',
   collapsedPanels: defaultCollapsedPanels,
   stretch: defaultStretch,
-  fitsAutoStretch: true
+  fitsAutoStretch: true,
+  previewZoomMode: 'fit',
+  previewZoom: 1
 };
 
 const defaultSequenceRun: SequenceRunState = {
@@ -1032,6 +1037,11 @@ function normalizeStretch(value: unknown): StretchSettings {
   };
 }
 
+function normalizePreviewZoom(value: unknown) {
+  const zoom = Number(value);
+  return Number.isFinite(zoom) ? Math.max(0.25, Math.min(4, zoom)) : defaultAcquisitionWorkspace.previewZoom;
+}
+
 function loadAcquisitionWorkspaceState(): AcquisitionWorkspaceState {
   const stored = settingsClient.loadJson<Partial<AcquisitionWorkspaceState>>(acquisitionWorkspaceStorageKey, {});
   const storedCollapsed = stored.collapsedPanels && typeof stored.collapsedPanels === 'object' && !Array.isArray(stored.collapsedPanels)
@@ -1047,7 +1057,9 @@ function loadAcquisitionWorkspaceState(): AcquisitionWorkspaceState {
       details: storedCollapsed.details === true
     },
     stretch: normalizeStretch(stored.stretch),
-    fitsAutoStretch: typeof stored.fitsAutoStretch === 'boolean' ? stored.fitsAutoStretch : defaultAcquisitionWorkspace.fitsAutoStretch
+    fitsAutoStretch: typeof stored.fitsAutoStretch === 'boolean' ? stored.fitsAutoStretch : defaultAcquisitionWorkspace.fitsAutoStretch,
+    previewZoomMode: stored.previewZoomMode === 'manual' ? 'manual' : 'fit',
+    previewZoom: normalizePreviewZoom(stored.previewZoom)
   };
 }
 
@@ -2379,6 +2391,8 @@ function AcquisitionTab({
   const [captureStats, setCaptureStats] = useState<CaptureStats | null>(null);
   const [monitorTab, setMonitorTab] = useState<AcquisitionMonitorTab>(workspaceState.monitorTab);
   const [collapsedPanels, setCollapsedPanels] = useState<Record<AcquisitionPanelKey, boolean>>(workspaceState.collapsedPanels);
+  const [previewZoomMode, setPreviewZoomMode] = useState<PreviewZoomMode>(workspaceState.previewZoomMode);
+  const [previewZoom, setPreviewZoom] = useState(workspaceState.previewZoom);
   const [phdStatus, setPhdStatus] = useState<Phd2Status | null>(null);
   const [phdMessage, setPhdMessage] = useState('');
   const [sequenceRun, setSequenceRun] = useState<SequenceRunState>(defaultSequenceRun);
@@ -2410,9 +2424,11 @@ function AcquisitionTab({
       monitorTab,
       collapsedPanels,
       stretch,
-      fitsAutoStretch
+      fitsAutoStretch,
+      previewZoomMode,
+      previewZoom
     });
-  }, [collapsedPanels, fitsAutoStretch, monitorTab, stretch]);
+  }, [collapsedPanels, fitsAutoStretch, monitorTab, previewZoom, previewZoomMode, stretch]);
 
   useEffect(() => {
     if (demoMode) {
@@ -2632,6 +2648,20 @@ function AcquisitionTab({
     setRenderStretch(defaultStretch);
   };
 
+  const setFitPreview = () => {
+    setPreviewZoomMode('fit');
+  };
+
+  const setActualSizePreview = () => {
+    setPreviewZoomMode('manual');
+    setPreviewZoom(1);
+  };
+
+  const adjustPreviewZoom = (delta: number) => {
+    setPreviewZoomMode('manual');
+    setPreviewZoom((current) => Math.max(0.25, Math.min(4, Number((current + delta).toFixed(2)))));
+  };
+
   const runTestExposure = async () => {
     if (captureRunning) {
       if (!window.confirm('Abort the active test exposure?')) {
@@ -2840,6 +2870,9 @@ function AcquisitionTab({
     ? `${activeItem.target.name} | ${plan.imageType} | ${plan.frameCount} x ${plan.exposureSeconds}s`
     : 'No active target';
   const visibleAcquisitionEvents = demoMode ? demoAcquisitionEvents : acquisitionEvents;
+  const previewZoomPercent = Math.round(previewZoom * 100);
+  const previewDimensions = previewImage?.width && previewImage.height ? `${previewImage.width} x ${previewImage.height}` : '-';
+  const previewSource = previewImage?.sourcePath || '-';
 
   return (
     <>
@@ -2870,24 +2903,62 @@ function AcquisitionTab({
       <div className="acquisition-workspace">
         <div className="acquisition-main">
           <Panel title="Frame Monitor" icon={<Aperture size={17} />}>
+            <div className="preview-command-bar">
+              <div className="preview-zoom-controls">
+                <button
+                  className={previewZoomMode === 'fit' ? 'active' : ''}
+                  type="button"
+                  disabled={!previewImage}
+                  onClick={setFitPreview}
+                >
+                  Fit
+                </button>
+                <button
+                  className={previewZoomMode === 'manual' && previewZoom === 1 ? 'active' : ''}
+                  type="button"
+                  disabled={!previewImage}
+                  onClick={setActualSizePreview}
+                >
+                  1:1
+                </button>
+                <button type="button" disabled={!previewImage} onClick={() => adjustPreviewZoom(-0.25)}>
+                  -
+                </button>
+                <span>{previewZoomMode === 'fit' ? 'Fit' : `${previewZoomPercent}%`}</span>
+                <button type="button" disabled={!previewImage} onClick={() => adjustPreviewZoom(0.25)}>
+                  +
+                </button>
+              </div>
+              <div className="preview-meta-strip">
+                <span>{previewDimensions}</span>
+                <span>{previewImage ? formatBytes(previewImage.sizeBytes) : '-'}</span>
+                <span>{previewImage?.sourceKind || '-'}</span>
+              </div>
+            </div>
             <div className={previewImage ? 'preview-box has-image' : 'preview-box'}>
-              {previewImage ? (
-                <img
-                  alt={previewImage.name}
-                  src={previewImage.dataUrl}
-                  style={{ filter: previewImage.sourceKind === 'fits' ? 'none' : stretchFilter(stretch) }}
-                  onLoad={(event) => {
-                    const image = event.currentTarget;
-                    setPreviewImage((current) =>
-                      current && current.dataUrl === previewImage.dataUrl
-                        ? { ...current, width: image.naturalWidth, height: image.naturalHeight }
-                        : current
-                    );
-                  }}
-                />
-              ) : (
-                <div>No frame loaded</div>
-              )}
+              <div className="preview-canvas">
+                {previewImage ? (
+                  <img
+                    alt={previewImage.name}
+                    src={previewImage.dataUrl}
+                    className={previewZoomMode === 'fit' ? 'fit' : 'manual'}
+                    style={{
+                      filter: previewImage.sourceKind === 'fits' ? 'none' : stretchFilter(stretch),
+                      width: previewZoomMode === 'fit' ? undefined : `${previewImage.width ? previewImage.width * previewZoom : 100 * previewZoom}px`
+                    }}
+                    onLoad={(event) => {
+                      const image = event.currentTarget;
+                      setPreviewImage((current) =>
+                        current && current.dataUrl === previewImage.dataUrl
+                          ? { ...current, width: image.naturalWidth, height: image.naturalHeight }
+                          : current
+                      );
+                    }}
+                  />
+                ) : (
+                  <div>No frame loaded</div>
+                )}
+              </div>
             </div>
             <div className="preview-toolbar">
               <label className="file-button">
@@ -2898,6 +2969,10 @@ function AcquisitionTab({
                 Clear
               </button>
               <div className="preview-file-name">{previewImage?.name || pipelineState.history[0]?.fileName || 'Waiting for frame'}</div>
+            </div>
+            <div className="preview-path-row" title={previewSource}>
+              <span>Source</span>
+              <strong>{previewSource}</strong>
             </div>
             <div className="stretch-inline">
               <label>
