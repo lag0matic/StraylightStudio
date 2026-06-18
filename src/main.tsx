@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { ChangeEvent, Dispatch, ReactNode, SetStateAction } from 'react';
-import { createRoot } from 'react-dom/client';
+import { createRoot, type Root } from 'react-dom/client';
 import {
   Aperture,
   Camera,
@@ -115,7 +115,7 @@ type AcquisitionEvent = {
 
 type DiagnosticStatus = 'pending' | 'ok' | 'warn' | 'error';
 type CoolingTask = '' | 'cooling' | 'warming';
-type AcquisitionMonitorTab = 'preview' | 'guiding' | 'stretch' | 'stats' | 'recent' | 'planned';
+type AcquisitionMonitorTab = 'stats' | 'recent' | 'planned' | 'pipeline';
 type PipelineDetailTab = 'recent' | 'pending' | 'failed';
 
 type DiagnosticResult = {
@@ -1407,9 +1407,9 @@ function DataTable({ rows }: { rows: Array<[string, unknown]> }) {
   );
 }
 
-function Panel({ title, icon, children }: { title: string; icon?: ReactNode; children: ReactNode }) {
+function Panel({ title, icon, children, className = '' }: { title: string; icon?: ReactNode; children: ReactNode; className?: string }) {
   return (
-    <section className="panel">
+    <section className={className ? `panel ${className}` : 'panel'}>
       <div className="panel-header">
         <h2>{title}</h2>
         {icon}
@@ -2283,7 +2283,7 @@ function AcquisitionTab({
   const [captureRunning, setCaptureRunning] = useState(false);
   const [captureMessage, setCaptureMessage] = useState('');
   const [captureStats, setCaptureStats] = useState<CaptureStats | null>(null);
-  const [monitorTab, setMonitorTab] = useState<AcquisitionMonitorTab>('preview');
+  const [monitorTab, setMonitorTab] = useState<AcquisitionMonitorTab>('stats');
   const [phdStatus, setPhdStatus] = useState<Phd2Status | null>(null);
   const [phdMessage, setPhdMessage] = useState('');
   const [sequenceRun, setSequenceRun] = useState<SequenceRunState>(defaultSequenceRun);
@@ -2753,30 +2753,9 @@ function AcquisitionTab({
         </button>
       </section>
 
-      <div className="tab-grid acquisition-grid">
-      <Panel title="Acquisition Monitor" icon={<Aperture size={17} />}>
-        <div className="monitor-tabs">
-          {[
-            ['preview', 'Preview'],
-            ['guiding', 'Guiding'],
-            ['stretch', 'Stretch'],
-            ['stats', 'Stats'],
-            ['recent', 'Recent'],
-            ['planned', 'Planned']
-          ].map(([key, label]) => (
-            <button
-              className={monitorTab === key ? 'monitor-tab active' : 'monitor-tab'}
-              key={key}
-              type="button"
-              onClick={() => setMonitorTab(key as AcquisitionMonitorTab)}
-            >
-              {label}
-            </button>
-          ))}
-        </div>
-
-        {monitorTab === 'preview' ? (
-          <>
+      <div className="acquisition-workspace">
+        <div className="acquisition-main">
+          <Panel title="Frame Monitor" icon={<Aperture size={17} />}>
             <div className={previewImage ? 'preview-box has-image' : 'preview-box'}>
               {previewImage ? (
                 <img
@@ -2796,7 +2775,7 @@ function AcquisitionTab({
                 <div>No frame loaded</div>
               )}
             </div>
-            <div className="button-row">
+            <div className="preview-toolbar">
               <label className="file-button">
                 Load Preview Image
                 <input type="file" accept="image/png,image/jpeg,image/webp" onChange={handlePreviewFile} />
@@ -2846,261 +2825,212 @@ function AcquisitionTab({
               <button type="button" onClick={setAutoStretch}>Auto</button>
               <button type="button" onClick={() => setStretch(defaultStretch)}>Reset</button>
             </div>
-          </>
-        ) : null}
+          </Panel>
+        </div>
 
-        {monitorTab === 'guiding' ? (
-          <GuidingPanel status={phdStatus} message={phdMessage} />
-        ) : null}
+        <div className="acquisition-side">
+          <Panel title="Guiding" icon={<Crosshair size={17} />}>
+            <GuidingPanel status={phdStatus} message={phdMessage} />
+          </Panel>
 
-        {monitorTab === 'stretch' ? (
-          <>
-            <div className="stretch-stack">
+          <Panel title="Test Exposure" icon={<Camera size={17} />}>
+            <div className="form-grid compact-form-grid">
               <label>
-                Black point
+                Exposure seconds
                 <input
-                  type="range"
+                  type="number"
+                  value={testExposureSeconds}
+                  min="0.1"
+                  max="30"
+                  step="0.1"
+                  onChange={(event) => setTestExposureSeconds(Number(event.target.value))}
+                />
+              </label>
+              <label>
+                Gain
+                <input
+                  type="number"
+                  value={testExposureGain}
                   min="0"
-                  max="5000"
-                  step="10"
-                  value={stretch.blackPoint}
-                  onChange={(event) => updateStretch('blackPoint', Number(event.target.value))}
+                  step="1"
+                  onChange={(event) => setTestExposureGain(Number(event.target.value))}
                 />
-                <span>{stretch.blackPoint}</span>
               </label>
               <label>
-                Midtone
-                <input
-                  type="range"
-                  min="0.5"
-                  max="3"
-                  step="0.05"
-                  value={stretch.midtone}
-                  onChange={(event) => updateStretch('midtone', Number(event.target.value))}
-                />
-                <span>{stretch.midtone.toFixed(2)}</span>
-              </label>
-              <label>
-                White point
-                <input
-                  type="range"
-                  min="100"
-                  max="65535"
-                  step="10"
-                  value={stretch.whitePoint}
-                  onChange={(event) => updateStretch('whitePoint', Number(event.target.value))}
-                />
-                <span>{stretch.whitePoint}</span>
+                Image type
+                <select value={testExposureType} onChange={(event) => setTestExposureType(event.target.value)}>
+                  <option value="SNAPSHOT">Snapshot</option>
+                  <option value="LIGHT">Light</option>
+                  <option value="DARK">Dark</option>
+                  <option value="BIAS">Bias</option>
+                  <option value="FLAT">Flat</option>
+                </select>
               </label>
             </div>
-            <div className="button-row">
-              <button type="button" onClick={setAutoStretch}>Auto Stretch</button>
-              <button type="button" onClick={() => setStretch(defaultStretch)}>Reset</button>
-            </div>
-          </>
-        ) : null}
-
-        {monitorTab === 'stats' ? (
-          <DataTable
-            rows={[
-              ['Loaded file', previewImage?.name],
-              ['File type', previewImage?.type],
-              ['File size', previewImage ? formatBytes(previewImage.sizeBytes) : undefined],
-              ['Image size', previewImage?.width && previewImage.height ? `${previewImage.width} x ${previewImage.height}` : undefined],
-              ['Median ADU', captureStats?.Median ?? 'Not computed'],
-              ['Mean ADU', captureStats?.Mean ?? 'Not computed'],
-              ['Min / Max', captureStats ? `${formatValue(captureStats.Min)} / ${formatValue(captureStats.Max)}` : 'Not computed'],
-              ['Star count', captureStats?.Stars ?? 'Not computed'],
-              ['HFR', captureStats?.HFR ?? 'Not computed'],
-              ['StDev', captureStats?.StDev ?? 'Not computed']
-            ]}
-          />
-        ) : null}
-
-        {monitorTab === 'recent' ? (
-          visibleAcquisitionEvents.length ? (
-            <div className="acquisition-event-list">
-              {visibleAcquisitionEvents.map((event) => (
-                <div className="acquisition-event-row" key={event.id}>
-                  <time>{event.receivedAt}</time>
-                  <div>
-                    <strong>{event.event}</strong>
-                    <span>{event.detail}</span>
-                  </div>
-                </div>
-              ))}
-            </div>
-          ) : (
-            <div className="empty-state">
-              <ListTree size={18} />
-              Waiting for capture and image events.
-            </div>
-          )
-        ) : null}
-
-        {monitorTab === 'planned' ? (
-          plannedFrames.length ? (
-            <div className="frame-list">
-              {plannedFrames.map((frame) => (
-                <div className="frame-row" key={frame.path}>
-                  <span>{frame.number}</span>
-                  <strong>{frame.path}</strong>
-                  <em>{frame.status}</em>
-                </div>
-              ))}
-              {hiddenPlannedFrameCount ? <div className="frame-more">+{hiddenPlannedFrameCount} more planned</div> : null}
-            </div>
-          ) : (
-            <div className="empty-state">
-              <Save size={18} />
-              Select a queued target to preview expected files.
-            </div>
-          )
-        ) : null}
-      </Panel>
-
-      <Panel title="Guiding" icon={<Crosshair size={17} />}>
-        <GuidingPanel status={phdStatus} message={phdMessage} />
-      </Panel>
-
-      <Panel title="Test Exposure" icon={<Camera size={17} />}>
-        <div className="form-grid">
-          <label>
-            Exposure seconds
-            <input
-              type="number"
-              value={testExposureSeconds}
-              min="0.1"
-              max="30"
-              step="0.1"
-              onChange={(event) => setTestExposureSeconds(Number(event.target.value))}
+            <DataTable
+              rows={[
+                ['Mode', 'Preview only'],
+                ['Saved by NINA', 'No'],
+                ['Status', captureMessage || (captureRunning ? 'Capturing' : 'Idle')]
+              ]}
             />
-          </label>
-          <label>
-            Gain
-            <input
-              type="number"
-              value={testExposureGain}
-              min="0"
-              step="1"
-              onChange={(event) => setTestExposureGain(Number(event.target.value))}
-            />
-          </label>
-          <label>
-            Image type
-            <select value={testExposureType} onChange={(event) => setTestExposureType(event.target.value)}>
-              <option value="SNAPSHOT">Snapshot</option>
-              <option value="LIGHT">Light</option>
-              <option value="DARK">Dark</option>
-              <option value="BIAS">Bias</option>
-              <option value="FLAT">Flat</option>
-            </select>
-          </label>
-        </div>
-        <DataTable
-          rows={[
-            ['Mode', 'Preview only'],
-            ['Saved by NINA', 'No'],
-            ['Status', captureMessage || (captureRunning ? 'Capturing' : 'Idle')]
-          ]}
-        />
-        <div className="button-row">
-          <button
-            className={captureRunning ? 'capture-button active' : 'capture-button'}
-            type="button"
-            disabled={!camera?.Connected}
-            onClick={() => void runTestExposure()}
-          >
-            <Aperture size={16} />
-            {captureRunning ? 'Abort Exposure' : 'Test Exposure'}
-          </button>
-          <div className="inline-note">Streams a PNG preview. No FITS file is saved.</div>
-        </div>
-      </Panel>
-
-      <Panel title="Active Plan" icon={<Play size={17} />}>
-        <DataTable
-          rows={[
-            ['Target', activeItem?.target.name],
-            ['Image type', plan?.imageType],
-            ['Rotation', activeItem ? `${activeItem.target.rotationDegrees}°` : undefined],
-            ['Exposure', plan ? `${plan.exposureSeconds}s` : undefined],
-            ['Frames', plan?.frameCount],
-            ['Integration', plan ? formatDuration(totalIntegration) : undefined],
-            ['Estimated duration', plan ? formatDuration(estimatedDuration) : undefined],
-            ['Gain', plan?.gain],
-            ['Offset', plan?.offset],
-            ['Camera temp', plan ? `${plan.temperatureC} C` : undefined],
-            ['Autofocus', plan?.autofocusBeforeRun],
-            ['Guiding', plan?.guidingRequired],
-            ['Dither', plan?.dither],
-            ['Storage root', sessionRoot || 'Relative preview'],
-            ['Folder', activeItem && plan ? storageClient.sessionFolderPath(sessionRoot, activeItem.target, plan) : undefined],
-            ['First file', activeItem && plan ? storageClient.firstFrameDestinationPath(sessionRoot, activeItem.target, plan) : undefined]
-          ]}
-        />
-        <div className="button-row">
-          <button
-            className={sequenceRun.running ? 'capture-button active' : 'capture-button'}
-            type="button"
-            disabled={!activeItem || !camera?.Connected}
-            onClick={() => void runActivePlanCapture()}
-          >
-            {sequenceRun.running ? <CircleStop size={16} /> : <Play size={16} />}
-            {sequenceRun.running ? 'Abort Capture Run' : 'Start Capture Run'}
-          </button>
-          <div className="inline-note">Saved FITS capture only. Slew, center, autofocus, and guiding are not started yet.</div>
-        </div>
-      </Panel>
-
-      <Panel title="Capture State" icon={<Thermometer size={17} />}>
-        <DataTable
-          rows={[
-            ['Camera state', camera?.CameraState],
-            ['Exposing', camera?.IsExposing],
-            ['Temperature', formatTemp(camera?.Temperature)],
-            ['Cooler power', camera?.CoolerPower === undefined ? undefined : `${camera.CoolerPower.toFixed(1)}%`],
-            ['Run progress', sequenceRun.totalFrames ? `${sequenceRun.currentFrame} / ${sequenceRun.totalFrames}` : '-'],
-            ['Run status', sequenceRun.message],
-            ['Run started', sequenceRun.startedAt],
-            ['Run completed', sequenceRun.completedAt],
-            ['Last frame', previewImage?.name ?? '-'],
-            ['Preview capture', captureRunning ? 'Running' : captureMessage || '-'],
-            ['Captured frames', sequenceRun.totalFrames ? sequenceRun.currentFrame : '0'],
-            ['Agent pending', pipelineState.pending.length],
-            ['Delivered frames', pipelineState.health?.deliveredFrames],
-            ['Failed transfers', pipelineState.failed.length]
-          ]}
-        />
-      </Panel>
-
-      <Panel title="Capture Pipeline" icon={<Save size={17} />}>
-        <PipelinePanel pipelineState={pipelineState} />
-      </Panel>
-
-      <Panel title="Tonight Queue" icon={<ListTree size={17} />}>
-        {queue.length ? (
-          <div className="queue-list">
-            {queue.map((item, index) => (
+            <div className="button-row compact-button-row">
               <button
-                className={activeItem?.id === item.id ? 'queue-select active' : 'queue-select'}
-                key={item.id}
+                className={captureRunning ? 'capture-button active' : 'capture-button'}
                 type="button"
-                onClick={() => onSetActiveQueueItem(item.id)}
+                disabled={!camera?.Connected}
+                onClick={() => void runTestExposure()}
               >
-                <span>{index + 1}</span>
-                <strong>{item.target.name}</strong>
-                <em>{item.plan.imageType} | {item.plan.frameCount} x {item.plan.exposureSeconds}s</em>
+                <Aperture size={16} />
+                {captureRunning ? 'Abort Exposure' : 'Test Exposure'}
+              </button>
+            </div>
+          </Panel>
+
+          <Panel title="Tonight Queue" icon={<ListTree size={17} />}>
+            {queue.length ? (
+              <div className="queue-list compact-queue-list">
+                {queue.map((item, index) => (
+                  <button
+                    className={activeItem?.id === item.id ? 'queue-select active' : 'queue-select'}
+                    key={item.id}
+                    type="button"
+                    onClick={() => onSetActiveQueueItem(item.id)}
+                  >
+                    <span>{index + 1}</span>
+                    <strong>{item.target.name}</strong>
+                    <em>{item.plan.imageType} | {item.plan.frameCount} x {item.plan.exposureSeconds}s</em>
+                  </button>
+                ))}
+              </div>
+            ) : (
+              <div className="empty-state">
+                <ListTree size={18} />
+                Add a target from Targeting to populate acquisition.
+              </div>
+            )}
+          </Panel>
+        </div>
+
+        <Panel title="Run Details" icon={<ListTree size={17} />} className="acquisition-details">
+          <div className="monitor-tabs">
+            {([
+              ['stats', 'Frame Stats'],
+              ['recent', `Recent ${visibleAcquisitionEvents.length}`],
+              ['planned', `Planned ${plannedFrames.length}`],
+              ['pipeline', 'Pipeline']
+            ] as const).map(([key, label]) => (
+              <button
+                className={monitorTab === key ? 'monitor-tab active' : 'monitor-tab'}
+                key={key}
+                type="button"
+                onClick={() => setMonitorTab(key)}
+              >
+                {label}
               </button>
             ))}
           </div>
-        ) : (
-          <div className="empty-state">
-            <ListTree size={18} />
-            Add a target from Targeting to populate acquisition.
-          </div>
-        )}
-      </Panel>
+
+          {monitorTab === 'stats' ? (
+            <div className="details-grid">
+              <DataTable
+                rows={[
+                  ['Loaded file', previewImage?.name],
+                  ['File type', previewImage?.type],
+                  ['File size', previewImage ? formatBytes(previewImage.sizeBytes) : undefined],
+                  ['Image size', previewImage?.width && previewImage.height ? `${previewImage.width} x ${previewImage.height}` : undefined],
+                  ['Median ADU', captureStats?.Median ?? 'Not computed'],
+                  ['Mean ADU', captureStats?.Mean ?? 'Not computed'],
+                  ['Min / Max', captureStats ? `${formatValue(captureStats.Min)} / ${formatValue(captureStats.Max)}` : 'Not computed'],
+                  ['Star count', captureStats?.Stars ?? 'Not computed'],
+                  ['HFR', captureStats?.HFR ?? 'Not computed'],
+                  ['StDev', captureStats?.StDev ?? 'Not computed']
+                ]}
+              />
+              <DataTable
+                rows={[
+                  ['Target', activeItem?.target.name],
+                  ['Image type', plan?.imageType],
+                  ['Rotation', activeItem ? `${activeItem.target.rotationDegrees} deg` : undefined],
+                  ['Exposure', plan ? `${plan.exposureSeconds}s` : undefined],
+                  ['Frames', plan?.frameCount],
+                  ['Integration', plan ? formatDuration(totalIntegration) : undefined],
+                  ['Estimated duration', plan ? formatDuration(estimatedDuration) : undefined],
+                  ['Gain', plan?.gain],
+                  ['Offset', plan?.offset],
+                  ['Camera temp', plan ? `${plan.temperatureC} C` : undefined],
+                  ['Autofocus', plan?.autofocusBeforeRun],
+                  ['Guiding', plan?.guidingRequired],
+                  ['Dither', plan?.dither],
+                  ['Storage root', sessionRoot || 'Relative preview'],
+                  ['Folder', activeItem && plan ? storageClient.sessionFolderPath(sessionRoot, activeItem.target, plan) : undefined],
+                  ['First file', activeItem && plan ? storageClient.firstFrameDestinationPath(sessionRoot, activeItem.target, plan) : undefined]
+                ]}
+              />
+              <DataTable
+                rows={[
+                  ['Camera state', camera?.CameraState],
+                  ['Exposing', camera?.IsExposing],
+                  ['Temperature', formatTemp(camera?.Temperature)],
+                  ['Cooler power', camera?.CoolerPower === undefined ? undefined : `${camera.CoolerPower.toFixed(1)}%`],
+                  ['Run progress', sequenceRun.totalFrames ? `${sequenceRun.currentFrame} / ${sequenceRun.totalFrames}` : '-'],
+                  ['Run status', sequenceRun.message],
+                  ['Run started', sequenceRun.startedAt],
+                  ['Run completed', sequenceRun.completedAt],
+                  ['Last frame', previewImage?.name ?? '-'],
+                  ['Preview capture', captureRunning ? 'Running' : captureMessage || '-'],
+                  ['Captured frames', sequenceRun.totalFrames ? sequenceRun.currentFrame : '0'],
+                  ['Agent pending', pipelineState.pending.length],
+                  ['Delivered frames', pipelineState.health?.deliveredFrames],
+                  ['Failed transfers', pipelineState.failed.length]
+                ]}
+              />
+            </div>
+          ) : null}
+
+          {monitorTab === 'recent' ? (
+            visibleAcquisitionEvents.length ? (
+              <div className="acquisition-event-list">
+                {visibleAcquisitionEvents.map((event) => (
+                  <div className="acquisition-event-row" key={event.id}>
+                    <time>{event.receivedAt}</time>
+                    <div>
+                      <strong>{event.event}</strong>
+                      <span>{event.detail}</span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <div className="empty-state">
+                <ListTree size={18} />
+                Waiting for capture and image events.
+              </div>
+            )
+          ) : null}
+
+          {monitorTab === 'planned' ? (
+            plannedFrames.length ? (
+              <div className="frame-list">
+                {plannedFrames.map((frame) => (
+                  <div className="frame-row" key={frame.path}>
+                    <span>{frame.number}</span>
+                    <strong>{frame.path}</strong>
+                    <em>{frame.status}</em>
+                  </div>
+                ))}
+                {hiddenPlannedFrameCount ? <div className="frame-more">+{hiddenPlannedFrameCount} more planned</div> : null}
+              </div>
+            ) : (
+              <div className="empty-state">
+                <Save size={18} />
+                Select a queued target to preview expected files.
+              </div>
+            )
+          ) : null}
+
+          {monitorTab === 'pipeline' ? <PipelinePanel pipelineState={pipelineState} /> : null}
+        </Panel>
       </div>
     </>
   );
@@ -4277,4 +4207,12 @@ function App() {
   );
 }
 
-createRoot(document.getElementById('root')!).render(<App />);
+declare global {
+  interface Window {
+    straylightRoot?: Root;
+  }
+}
+
+const rootElement = document.getElementById('root')!;
+window.straylightRoot ??= createRoot(rootElement);
+window.straylightRoot.render(<App />);
