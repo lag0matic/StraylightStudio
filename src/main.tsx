@@ -474,6 +474,124 @@ const demoEvents: NinaEvent[] = [
   { id: 1, receivedAt: '22:10:31', event: 'SequenceStarting', detail: 'Target: M31 | Exposure: 180s | Count: 60' }
 ];
 
+const demoAcquisitionEvents: AcquisitionEvent[] = [
+  { id: 4, receivedAt: '22:21:05', event: 'ImageSaved', target: 'M 31', imageType: 'LIGHT', fileName: 'M 31_-10.00_180.00_LIGHT_0004.fits', detail: 'target M 31 | type LIGHT | HFR 2.7 | stars 191' },
+  { id: 3, receivedAt: '22:18:02', event: 'ImageSaved', target: 'M 31', imageType: 'LIGHT', fileName: 'M 31_-10.00_180.00_LIGHT_0003.fits', detail: 'target M 31 | type LIGHT | HFR 2.6 | stars 184' },
+  { id: 2, receivedAt: '22:15:00', event: 'ImageSaved', target: 'M 31', imageType: 'LIGHT', fileName: 'M 31_-10.00_180.00_LIGHT_0002.fits', detail: 'target M 31 | type LIGHT | HFR 2.8 | stars 176' },
+  { id: 1, receivedAt: '22:12:00', event: 'ImageSaved', target: 'M 31', imageType: 'LIGHT', fileName: 'M 31_-10.00_180.00_LIGHT_0001.fits', detail: 'target M 31 | type LIGHT | HFR 2.9 | stars 168' }
+];
+
+const demoPipelineState: AcquisitionPipelineState = {
+  health: {
+    name: 'Starrunner.Agent demo',
+    status: 'ok',
+    ninaOutputRoot: 'C:\\Astro\\nina-output',
+    pendingFrames: 2,
+    deliveredFrames: 4,
+    utc: new Date().toISOString()
+  },
+  pending: [
+    {
+      id: 'demo-m31-light-0005',
+      targetName: 'M 31',
+      imageType: 'LIGHT',
+      frameNumber: 5,
+      sourceKind: 'nina',
+      fileName: 'M 31_-10.00_180.00_LIGHT_0005.fits',
+      sourcePath: 'C:\\Astro\\nina-output\\2026-06-17\\M 31\\LIGHT\\M 31_-10.00_180.00_LIGHT_0005.fits',
+      sizeBytes: 40368960,
+      sha256: 'demo-sha-0005',
+      createdAt: '2026-06-17T22:24:00Z',
+      status: 'pending'
+    },
+    {
+      id: 'demo-m31-light-0006',
+      targetName: 'M 31',
+      imageType: 'LIGHT',
+      frameNumber: 6,
+      sourceKind: 'nina',
+      fileName: 'M 31_-10.00_180.00_LIGHT_0006.fits',
+      sourcePath: 'C:\\Astro\\nina-output\\2026-06-17\\M 31\\LIGHT\\M 31_-10.00_180.00_LIGHT_0006.fits',
+      sizeBytes: 40368960,
+      sha256: 'demo-sha-0006',
+      createdAt: '2026-06-17T22:27:00Z',
+      status: 'pending'
+    }
+  ],
+  failed: [],
+  history: [
+    {
+      id: 'demo-m31-light-0004',
+      transferredAt: '22:21:12',
+      targetName: 'M 31',
+      imageType: 'LIGHT',
+      sourceKind: 'nina',
+      fileName: 'M 31_-10.00_180.00_LIGHT_0004.fits',
+      destinationPath: 'F:\\Astro\\jun172026_m31_light\\M 31_-10.00_180.00_LIGHT_0004.fits',
+      sizeBytes: 40368960,
+      sha256: 'demo-sha-0004'
+    },
+    {
+      id: 'demo-m31-light-0003',
+      transferredAt: '22:18:10',
+      targetName: 'M 31',
+      imageType: 'LIGHT',
+      sourceKind: 'nina',
+      fileName: 'M 31_-10.00_180.00_LIGHT_0003.fits',
+      destinationPath: 'F:\\Astro\\jun172026_m31_light\\M 31_-10.00_180.00_LIGHT_0003.fits',
+      sizeBytes: 40368960,
+      sha256: 'demo-sha-0003'
+    }
+  ],
+  autoTransfer: true,
+  message: 'Demo agent reachable',
+  checkedAt: '22:24:12'
+};
+
+const demoPhdStatus: Phd2Status = {
+  connected: true,
+  appState: 'Guiding',
+  version: '2.6.13-demo',
+  lastEvent: 'GuideStep',
+  error: null,
+  lastEventAt: new Date().toISOString(),
+  samples: Array.from({ length: 90 }, (_, index) => {
+    const dx = Math.sin(index / 6) * 0.42 + Math.sin(index / 17) * 0.15;
+    const dy = Math.cos(index / 7) * 0.34 - Math.sin(index / 13) * 0.12;
+    return {
+      frame: index + 1,
+      time: index * 2,
+      dx,
+      dy,
+      raDuration: Math.abs(dx) * 820,
+      raDirection: dx >= 0 ? 'East' : 'West',
+      decDuration: Math.abs(dy) * 760,
+      decDirection: dy >= 0 ? 'North' : 'South',
+      snr: 34 + Math.sin(index / 8) * 4,
+      hfd: 2.9 + Math.cos(index / 10) * 0.25,
+      avgDist: Math.sqrt(dx ** 2 + dy ** 2),
+      receivedAt: new Date(Date.now() - (90 - index) * 2000).toISOString()
+    };
+  })
+};
+
+const demoTppaWorkflow: TppaWorkflowState = {
+  socket: 'open',
+  step: 'Adjust',
+  status: 'Demo solve complete. Adjust mount bolts.',
+  azimuthError: -1.42,
+  altitudeError: 0.84,
+  totalError: 1.65,
+  instruction: 'Move left 1.42 and move up 0.84, then wait for the next solve.',
+  lastMessage: 'Demo TPPA adjustment available.',
+  lastUpdated: '22:19:34',
+  rawEvents: [
+    { id: 3, receivedAt: '22:19:34', event: 'Adjustment', detail: 'Azimuth -1.42 | Altitude 0.84 | Total 1.65' },
+    { id: 2, receivedAt: '22:18:59', event: 'Solve', detail: 'Point 3 solved successfully.' },
+    { id: 1, receivedAt: '22:17:42', event: 'Start', detail: 'Demo TPPA started at current position.' }
+  ]
+};
+
 const demoTarget: ImportedTarget = {
   name: 'M 31',
   objectType: 'Galaxy',
@@ -2140,6 +2258,7 @@ function AcquisitionTab({
   queue,
   sessionRoot,
   acquisitionEvents,
+  demoMode,
   onSetActiveQueueItem
 }: {
   equipment: EquipmentInfo | null;
@@ -2147,6 +2266,7 @@ function AcquisitionTab({
   queue: QueueItem[];
   sessionRoot: string | null;
   acquisitionEvents: AcquisitionEvent[];
+  demoMode: boolean;
   onSetActiveQueueItem: (id: string) => void;
 }) {
   const camera = equipment?.Camera;
@@ -2187,6 +2307,12 @@ function AcquisitionTab({
   const hiddenPlannedFrameCount = plan ? Math.max(0, plan.frameCount - plannedFrames.length) : 0;
 
   useEffect(() => {
+    if (demoMode) {
+      setPhdStatus(demoPhdStatus);
+      setPhdMessage('');
+      return undefined;
+    }
+
     let cancelled = false;
 
     const pollPhd = async () => {
@@ -2211,9 +2337,14 @@ function AcquisitionTab({
       cancelled = true;
       window.clearInterval(intervalId);
     };
-  }, []);
+  }, [demoMode]);
 
   useEffect(() => {
+    if (demoMode) {
+      setPipelineState(demoPipelineState);
+      return undefined;
+    }
+
     let cancelled = false;
 
     const refreshPipelineState = async () => {
@@ -2266,7 +2397,7 @@ function AcquisitionTab({
       cancelled = true;
       window.clearInterval(intervalId);
     };
-  }, []);
+  }, [demoMode]);
 
   useEffect(() => {
     if (fitsAutoStretch) {
@@ -2594,6 +2725,7 @@ function AcquisitionTab({
   const activeSummary = activeItem && plan
     ? `${activeItem.target.name} | ${plan.imageType} | ${plan.frameCount} x ${plan.exposureSeconds}s`
     : 'No active target';
+  const visibleAcquisitionEvents = demoMode ? demoAcquisitionEvents : acquisitionEvents;
 
   return (
     <>
@@ -2786,9 +2918,9 @@ function AcquisitionTab({
         ) : null}
 
         {monitorTab === 'recent' ? (
-          acquisitionEvents.length ? (
+          visibleAcquisitionEvents.length ? (
             <div className="acquisition-event-list">
-              {acquisitionEvents.map((event) => (
+              {visibleAcquisitionEvents.map((event) => (
                 <div className="acquisition-event-row" key={event.id}>
                   <time>{event.receivedAt}</time>
                   <div>
@@ -3673,8 +3805,13 @@ function App() {
   }, []);
 
   useEffect(() => {
-    if (demoMode || httpStatus !== 'online') {
-      setTppaWorkflow((current) => ({ ...current, socket: demoMode ? 'idle' : 'closed' }));
+    if (demoMode) {
+      setTppaWorkflow(demoTppaWorkflow);
+      return undefined;
+    }
+
+    if (httpStatus !== 'online') {
+      setTppaWorkflow((current) => ({ ...current, socket: 'closed' }));
       return undefined;
     }
 
@@ -3744,7 +3881,17 @@ function App() {
 
   const runAutofocus = async (cancel = false) => {
     if (demoMode) {
-      setCommandMessage(cancel ? 'Demo autofocus canceled.' : 'Demo autofocus started.');
+      if (cancel) {
+        setCommandBusy('');
+        setCommandMessage('Demo autofocus canceled.');
+        return;
+      }
+      setCommandMessage('Demo autofocus started.');
+      setCommandBusy('start-af');
+      window.setTimeout(() => {
+        setCommandBusy('');
+        setCommandMessage('Demo autofocus complete.');
+      }, 1200);
       return;
     }
 
@@ -3830,9 +3977,15 @@ function App() {
     if (demoMode) {
       setCommandMessage(`Demo TPPA command: ${action}`);
       setTppaWorkflow((current) => ({
-        ...current,
-        step: action,
-        status: 'Demo TPPA command sent.',
+        ...demoTppaWorkflow,
+        step: action === 'stop-alignment' ? 'Stopped' : action === 'pause-alignment' ? 'Paused' : action === 'resume-alignment' ? 'Adjust' : 'Running',
+        status: action === 'stop-alignment' ? 'Demo TPPA stopped.' : action === 'pause-alignment' ? 'Demo TPPA paused.' : action === 'resume-alignment' ? 'Demo TPPA resumed.' : 'Demo TPPA command sent.',
+        rawEvents: [{
+          id: ++tppaEventIdRef.current,
+          receivedAt: new Date().toLocaleTimeString(),
+          event: action,
+          detail: 'Demo TPPA command sent.'
+        }, ...current.rawEvents].slice(0, 20),
         lastUpdated: new Date().toLocaleTimeString()
       }));
       return;
@@ -4104,6 +4257,7 @@ function App() {
           queue={queue}
           sessionRoot={sessionRoot}
           acquisitionEvents={acquisitionEvents}
+          demoMode={demoMode}
           onSetActiveQueueItem={setActiveQueueId}
         />
       ) : null}
