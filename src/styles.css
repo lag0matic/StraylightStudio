@@ -406,8 +406,37 @@ h2 {
   color: var(--text);
 }
 
+.panel-header-actions {
+  display: inline-flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.panel-header-actions svg,
 .panel-header svg {
   color: var(--quiet);
+}
+
+.panel-collapse-button {
+  display: inline-grid;
+  width: 28px;
+  height: 28px;
+  place-items: center;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  padding: 0;
+}
+
+.panel-collapse-button:hover {
+  border-color: var(--border);
+  background: #202024;
+  color: var(--text);
+}
+
+.panel.collapsed .panel-header {
+  border-bottom: 0;
 }
 
 .data-table {

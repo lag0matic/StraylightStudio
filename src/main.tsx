@@ -4,6 +4,8 @@ import { createRoot, type Root } from 'react-dom/client';
 import {
   Aperture,
   Camera,
+  ChevronDown,
+  ChevronRight,
   CircleStop,
   Crosshair,
   Focus,
@@ -116,6 +118,7 @@ type AcquisitionEvent = {
 type DiagnosticStatus = 'pending' | 'ok' | 'warn' | 'error';
 type CoolingTask = '' | 'cooling' | 'warming';
 type AcquisitionMonitorTab = 'stats' | 'recent' | 'planned' | 'pipeline';
+type AcquisitionPanelKey = 'guiding' | 'testExposure' | 'queue' | 'details';
 type PipelineDetailTab = 'recent' | 'pending' | 'failed';
 
 type DiagnosticResult = {
@@ -123,6 +126,13 @@ type DiagnosticResult = {
   status: DiagnosticStatus;
   detail: string;
   durationMs?: number;
+};
+
+type AcquisitionWorkspaceState = {
+  monitorTab: AcquisitionMonitorTab;
+  collapsedPanels: Record<AcquisitionPanelKey, boolean>;
+  stretch: StretchSettings;
+  fitsAutoStretch: boolean;
 };
 
 type CapabilityProbe = {
@@ -372,6 +382,7 @@ const redcatFrame = {
   previewFovDegrees: 4
 };
 const plannerStorageKey = 'astro-planner-state-v1';
+const acquisitionWorkspaceStorageKey = 'astro-acquisition-workspace-v1';
 const frameAgentStorageKey = 'astro-frame-agent-v1';
 const autoTransferStorageKey = 'astro-auto-transfer-enabled-v1';
 const autoTransferDefaultedStorageKey = 'astro-auto-transfer-defaulted-v2';
@@ -394,6 +405,20 @@ const defaultStretch: StretchSettings = {
   blackPoint: 0,
   midtone: 1,
   whitePoint: 65535
+};
+
+const defaultCollapsedPanels: Record<AcquisitionPanelKey, boolean> = {
+  guiding: false,
+  testExposure: false,
+  queue: false,
+  details: false
+};
+
+const defaultAcquisitionWorkspace: AcquisitionWorkspaceState = {
+  monitorTab: 'stats',
+  collapsedPanels: defaultCollapsedPanels,
+  stretch: defaultStretch,
+  fitsAutoStretch: true
 };
 
 const defaultSequenceRun: SequenceRunState = {
@@ -986,6 +1011,46 @@ function loadPlannerState(): Partial<PersistedPlannerState> {
   return settingsClient.loadJson<Partial<PersistedPlannerState>>(plannerStorageKey, {});
 }
 
+function isAcquisitionMonitorTab(value: unknown): value is AcquisitionMonitorTab {
+  return value === 'stats' || value === 'recent' || value === 'planned' || value === 'pipeline';
+}
+
+function normalizeStretch(value: unknown): StretchSettings {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return defaultStretch;
+  }
+
+  const candidate = value as Partial<StretchSettings>;
+  const blackPoint = Number(candidate.blackPoint);
+  const midtone = Number(candidate.midtone);
+  const whitePoint = Number(candidate.whitePoint);
+
+  return {
+    blackPoint: Number.isFinite(blackPoint) ? Math.max(0, Math.min(65535, Math.round(blackPoint))) : defaultStretch.blackPoint,
+    midtone: Number.isFinite(midtone) ? Math.max(0.5, Math.min(3, midtone)) : defaultStretch.midtone,
+    whitePoint: Number.isFinite(whitePoint) ? Math.max(1, Math.min(65535, Math.round(whitePoint))) : defaultStretch.whitePoint
+  };
+}
+
+function loadAcquisitionWorkspaceState(): AcquisitionWorkspaceState {
+  const stored = settingsClient.loadJson<Partial<AcquisitionWorkspaceState>>(acquisitionWorkspaceStorageKey, {});
+  const storedCollapsed = stored.collapsedPanels && typeof stored.collapsedPanels === 'object' && !Array.isArray(stored.collapsedPanels)
+    ? stored.collapsedPanels as Partial<Record<AcquisitionPanelKey, boolean>>
+    : {};
+
+  return {
+    monitorTab: isAcquisitionMonitorTab(stored.monitorTab) ? stored.monitorTab : defaultAcquisitionWorkspace.monitorTab,
+    collapsedPanels: {
+      guiding: storedCollapsed.guiding === true,
+      testExposure: storedCollapsed.testExposure === true,
+      queue: storedCollapsed.queue === true,
+      details: storedCollapsed.details === true
+    },
+    stretch: normalizeStretch(stored.stretch),
+    fitsAutoStretch: typeof stored.fitsAutoStretch === 'boolean' ? stored.fitsAutoStretch : defaultAcquisitionWorkspace.fitsAutoStretch
+  };
+}
+
 function targetFromStellariumMap(map: Record<string, unknown>): ImportedTarget {
   const name = asText(findMapValue(map, ['name', 'localized name', 'english name', 'designation', 'object name'])) || 'Selected object';
   const raRaw = findMapValue(map, ['ra', 'right ascension', 'right ascension j2000', 'ra j2000', 'ra/dec j2000']);
@@ -1407,14 +1472,42 @@ function DataTable({ rows }: { rows: Array<[string, unknown]> }) {
   );
 }
 
-function Panel({ title, icon, children, className = '' }: { title: string; icon?: ReactNode; children: ReactNode; className?: string }) {
+function Panel({
+  title,
+  icon,
+  children,
+  className = '',
+  collapsible = false,
+  collapsed = false,
+  onToggle
+}: {
+  title: string;
+  icon?: ReactNode;
+  children: ReactNode;
+  className?: string;
+  collapsible?: boolean;
+  collapsed?: boolean;
+  onToggle?: () => void;
+}) {
   return (
-    <section className={className ? `panel ${className}` : 'panel'}>
+    <section className={`${className ? `panel ${className}` : 'panel'}${collapsed ? ' collapsed' : ''}`}>
       <div className="panel-header">
         <h2>{title}</h2>
-        {icon}
+        <div className="panel-header-actions">
+          {icon}
+          {collapsible ? (
+            <button
+              aria-label={collapsed ? `Expand ${title}` : `Collapse ${title}`}
+              className="panel-collapse-button"
+              type="button"
+              onClick={onToggle}
+            >
+              {collapsed ? <ChevronRight size={16} /> : <ChevronDown size={16} />}
+            </button>
+          ) : null}
+        </div>
       </div>
-      {children}
+      {collapsed ? null : children}
     </section>
   );
 }
@@ -2273,17 +2366,19 @@ function AcquisitionTab({
   const plan = activeItem?.plan;
   const totalIntegration = plan ? integrationSeconds(plan) : 0;
   const estimatedDuration = plan ? totalIntegration + (plan.autofocusBeforeRun ? 180 : 0) + (plan.guidingRequired ? 90 : 0) : 0;
+  const [workspaceState] = useState(loadAcquisitionWorkspaceState);
   const [previewImage, setPreviewImage] = useState<PreviewImage | null>(null);
-  const [stretch, setStretch] = useState<StretchSettings>(defaultStretch);
-  const [renderStretch, setRenderStretch] = useState<StretchSettings>(defaultStretch);
-  const [fitsAutoStretch, setFitsAutoStretch] = useState(true);
+  const [stretch, setStretch] = useState<StretchSettings>(workspaceState.stretch);
+  const [renderStretch, setRenderStretch] = useState<StretchSettings>(workspaceState.stretch);
+  const [fitsAutoStretch, setFitsAutoStretch] = useState(workspaceState.fitsAutoStretch);
   const [testExposureSeconds, setTestExposureSeconds] = useState(1);
   const [testExposureGain, setTestExposureGain] = useState(camera?.Gain ?? 200);
   const [testExposureType, setTestExposureType] = useState('SNAPSHOT');
   const [captureRunning, setCaptureRunning] = useState(false);
   const [captureMessage, setCaptureMessage] = useState('');
   const [captureStats, setCaptureStats] = useState<CaptureStats | null>(null);
-  const [monitorTab, setMonitorTab] = useState<AcquisitionMonitorTab>('stats');
+  const [monitorTab, setMonitorTab] = useState<AcquisitionMonitorTab>(workspaceState.monitorTab);
+  const [collapsedPanels, setCollapsedPanels] = useState<Record<AcquisitionPanelKey, boolean>>(workspaceState.collapsedPanels);
   const [phdStatus, setPhdStatus] = useState<Phd2Status | null>(null);
   const [phdMessage, setPhdMessage] = useState('');
   const [sequenceRun, setSequenceRun] = useState<SequenceRunState>(defaultSequenceRun);
@@ -2305,6 +2400,19 @@ function AcquisitionTab({
     return storageClient.plannedFramePaths(activeItem.target, plan, 18, sessionRoot);
   }, [activeItem, plan, sessionRoot]);
   const hiddenPlannedFrameCount = plan ? Math.max(0, plan.frameCount - plannedFrames.length) : 0;
+
+  const togglePanel = useCallback((key: AcquisitionPanelKey) => {
+    setCollapsedPanels((current) => ({ ...current, [key]: !current[key] }));
+  }, []);
+
+  useEffect(() => {
+    settingsClient.saveJson(acquisitionWorkspaceStorageKey, {
+      monitorTab,
+      collapsedPanels,
+      stretch,
+      fitsAutoStretch
+    });
+  }, [collapsedPanels, fitsAutoStretch, monitorTab, stretch]);
 
   useEffect(() => {
     if (demoMode) {
@@ -2516,6 +2624,12 @@ function AcquisitionTab({
         whitePoint: 42000
       });
     }
+  };
+
+  const resetStretch = () => {
+    setFitsAutoStretch(false);
+    setStretch(defaultStretch);
+    setRenderStretch(defaultStretch);
   };
 
   const runTestExposure = async () => {
@@ -2823,17 +2937,29 @@ function AcquisitionTab({
                 <span>{stretch.whitePoint}</span>
               </label>
               <button type="button" onClick={setAutoStretch}>Auto</button>
-              <button type="button" onClick={() => setStretch(defaultStretch)}>Reset</button>
+              <button type="button" onClick={resetStretch}>Reset</button>
             </div>
           </Panel>
         </div>
 
         <div className="acquisition-side">
-          <Panel title="Guiding" icon={<Crosshair size={17} />}>
+          <Panel
+            title="Guiding"
+            icon={<Crosshair size={17} />}
+            collapsible
+            collapsed={collapsedPanels.guiding}
+            onToggle={() => togglePanel('guiding')}
+          >
             <GuidingPanel status={phdStatus} message={phdMessage} />
           </Panel>
 
-          <Panel title="Test Exposure" icon={<Camera size={17} />}>
+          <Panel
+            title="Test Exposure"
+            icon={<Camera size={17} />}
+            collapsible
+            collapsed={collapsedPanels.testExposure}
+            onToggle={() => togglePanel('testExposure')}
+          >
             <div className="form-grid compact-form-grid">
               <label>
                 Exposure seconds
@@ -2887,7 +3013,13 @@ function AcquisitionTab({
             </div>
           </Panel>
 
-          <Panel title="Tonight Queue" icon={<ListTree size={17} />}>
+          <Panel
+            title="Tonight Queue"
+            icon={<ListTree size={17} />}
+            collapsible
+            collapsed={collapsedPanels.queue}
+            onToggle={() => togglePanel('queue')}
+          >
             {queue.length ? (
               <div className="queue-list compact-queue-list">
                 {queue.map((item, index) => (
@@ -2912,7 +3044,14 @@ function AcquisitionTab({
           </Panel>
         </div>
 
-        <Panel title="Run Details" icon={<ListTree size={17} />} className="acquisition-details">
+        <Panel
+          title="Run Details"
+          icon={<ListTree size={17} />}
+          className="acquisition-details"
+          collapsible
+          collapsed={collapsedPanels.details}
+          onToggle={() => togglePanel('details')}
+        >
           <div className="monitor-tabs">
             {([
               ['stats', 'Frame Stats'],
