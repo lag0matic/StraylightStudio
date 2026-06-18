@@ -155,6 +155,26 @@ async function chooseSessionRoot(currentRoot?: string | null) {
   return setSessionRoot(selected);
 }
 
+async function choosePreviewFile() {
+  if (!tauriClient.isDesktopRuntime()) {
+    return null;
+  }
+
+  const selected = await open({
+    title: 'Open FITS preview',
+    directory: false,
+    multiple: false,
+    filters: [
+      {
+        name: 'FITS',
+        extensions: ['fits', 'fit', 'fts']
+      }
+    ]
+  });
+
+  return !selected || Array.isArray(selected) ? null : selected;
+}
+
 async function previewFramePath(sessionFolderPath: string, frameNumber: number) {
   const desktopPath = await tauriClient.invokeIfDesktop<string>('preview_frame_path', {
     preview: {
@@ -210,6 +230,7 @@ export const storageClient = {
   setSessionRoot,
   clearSessionRoot,
   chooseSessionRoot,
+  choosePreviewFile,
   previewFramePath,
   prepareSessionFolder,
   writeFrame,

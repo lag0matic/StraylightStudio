@@ -931,6 +931,7 @@ h2 {
 }
 
 .preview-box {
+  position: relative;
   display: grid;
   min-height: 420px;
   overflow: auto;
@@ -943,11 +944,28 @@ h2 {
   align-content: center;
 }
 
+.preview-box.drag-active {
+  outline: 1px dashed #6f8f6f;
+  outline-offset: -8px;
+}
+
 .preview-canvas {
   display: grid;
   min-width: 100%;
   min-height: 420px;
   place-items: center;
+}
+
+.preview-rendering {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: rgba(18, 18, 19, 0.92);
+  color: var(--text);
+  font-size: 12px;
+  padding: 6px 8px;
 }
 
 .preview-box img {

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { ChangeEvent, Dispatch, ReactNode, SetStateAction } from 'react';
+import type { ChangeEvent, Dispatch, DragEvent, ReactNode, SetStateAction } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import {
   Aperture,
@@ -2389,6 +2389,8 @@ function AcquisitionTab({
   const [captureRunning, setCaptureRunning] = useState(false);
   const [captureMessage, setCaptureMessage] = useState('');
   const [captureStats, setCaptureStats] = useState<CaptureStats | null>(null);
+  const [previewRendering, setPreviewRendering] = useState(false);
+  const [previewDragActive, setPreviewDragActive] = useState(false);
   const [monitorTab, setMonitorTab] = useState<AcquisitionMonitorTab>(workspaceState.monitorTab);
   const [collapsedPanels, setCollapsedPanels] = useState<Record<AcquisitionPanelKey, boolean>>(workspaceState.collapsedPanels);
   const [previewZoomMode, setPreviewZoomMode] = useState<PreviewZoomMode>(workspaceState.previewZoomMode);
@@ -2418,6 +2420,43 @@ function AcquisitionTab({
   const togglePanel = useCallback((key: AcquisitionPanelKey) => {
     setCollapsedPanels((current) => ({ ...current, [key]: !current[key] }));
   }, []);
+
+  const renderFitsPath = useCallback(async (path: string, name?: string, sizeBytes = 0) => {
+    setPreviewRendering(true);
+    setCaptureMessage('Rendering FITS preview...');
+
+    try {
+      const preview = await storageClient.renderFitsPreview(path, renderStretch, fitsAutoStretch);
+
+      if (!preview) {
+        throw new Error('FITS preview rendering is available in the desktop app.');
+      }
+
+      if (fitsAutoStretch) {
+        setStretch({
+          blackPoint: Math.max(0, Math.round(preview.black_point)),
+          midtone: Number(preview.midtone.toFixed(2)),
+          whitePoint: Math.max(1, Math.round(preview.white_point))
+        });
+      }
+
+      setPreviewImage({
+        name: name || path.split(/[\\/]/).pop() || 'preview.fits',
+        sizeBytes,
+        type: 'image/fits',
+        dataUrl: preview.data_url,
+        width: preview.width,
+        height: preview.height,
+        sourcePath: preview.source_path,
+        sourceKind: 'fits'
+      });
+      setCaptureMessage('FITS preview rendered.');
+    } catch (caught) {
+      setCaptureMessage(caught instanceof Error ? caught.message : 'Unable to render FITS preview.');
+    } finally {
+      setPreviewRendering(false);
+    }
+  }, [fitsAutoStretch, renderStretch]);
 
   useEffect(() => {
     settingsClient.saveJson(acquisitionWorkspaceStorageKey, {
@@ -2541,6 +2580,10 @@ function AcquisitionTab({
   useEffect(() => {
     const latestFrame = pipelineState.history[0];
 
+    if (!tauriClient.isDesktopRuntime()) {
+      return undefined;
+    }
+
     if (!latestFrame?.destinationPath || !latestFrame.fileName.toLowerCase().match(/\.fits?$/)) {
       return undefined;
     }
@@ -2548,35 +2591,8 @@ function AcquisitionTab({
     let cancelled = false;
 
     const renderLatestFits = async () => {
-      try {
-        const preview = await storageClient.renderFitsPreview(latestFrame.destinationPath, renderStretch, fitsAutoStretch);
-
-        if (!preview || cancelled) {
-          return;
-        }
-
-        if (fitsAutoStretch) {
-          setStretch({
-            blackPoint: Math.max(0, Math.round(preview.black_point)),
-            midtone: Number(preview.midtone.toFixed(2)),
-            whitePoint: Math.max(1, Math.round(preview.white_point))
-          });
-        }
-
-        setPreviewImage({
-          name: latestFrame.fileName,
-          sizeBytes: latestFrame.sizeBytes,
-          type: 'image/bmp',
-          dataUrl: preview.data_url,
-          width: preview.width,
-          height: preview.height,
-          sourcePath: preview.source_path,
-          sourceKind: 'fits'
-        });
-      } catch (caught) {
-        if (!cancelled) {
-          setCaptureMessage(caught instanceof Error ? caught.message : 'Unable to render FITS preview.');
-        }
+      if (!cancelled) {
+        await renderFitsPath(latestFrame.destinationPath, latestFrame.fileName, latestFrame.sizeBytes);
       }
     };
 
@@ -2589,19 +2605,10 @@ function AcquisitionTab({
     pipelineState.history[0]?.destinationPath,
     pipelineState.history[0]?.fileName,
     pipelineState.history[0]?.sizeBytes,
-    renderStretch.blackPoint,
-    renderStretch.midtone,
-    renderStretch.whitePoint,
-    fitsAutoStretch
+    renderFitsPath
   ]);
 
-  const handlePreviewFile = (event: ChangeEvent<HTMLInputElement>) => {
-    const file = event.target.files?.[0];
-
-    if (!file) {
-      return;
-    }
-
+  const loadBitmapPreviewFile = (file: File) => {
     const reader = new FileReader();
     reader.onload = () => {
       if (typeof reader.result !== 'string') {
@@ -2616,8 +2623,79 @@ function AcquisitionTab({
         sourceKind: 'bitmap'
       });
       setFitsAutoStretch(false);
+      setCaptureMessage('Preview image loaded.');
     };
     reader.readAsDataURL(file);
+  };
+
+  const isFitsFileName = (name: string) => /\.(fits?|fts)$/i.test(name);
+
+  const loadPreviewFile = (file: File) => {
+    if (isFitsFileName(file.name)) {
+      setCaptureMessage('Use Open FITS to load FITS files so Straylight can render the real file path.');
+      return;
+    }
+
+    if (!file.type.startsWith('image/')) {
+      setCaptureMessage('Preview supports image files here. FITS files need Open FITS in the desktop app.');
+      return;
+    }
+
+    loadBitmapPreviewFile(file);
+  };
+
+  const handlePreviewFile = (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+
+    if (!file) {
+      return;
+    }
+
+    loadPreviewFile(file);
+    event.target.value = '';
+  };
+
+  const handlePreviewDrop = (event: DragEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    setPreviewDragActive(false);
+    const file = event.dataTransfer.files?.[0];
+
+    if (file) {
+      loadPreviewFile(file);
+    }
+  };
+
+  const chooseFitsPreview = async () => {
+    try {
+      const selectedPath = await storageClient.choosePreviewFile();
+
+      if (!selectedPath) {
+        if (!tauriClient.isDesktopRuntime()) {
+          setCaptureMessage('Open FITS is available in the desktop app. Drop PNG/JPG/WebP files here in browser mode.');
+        }
+        return;
+      }
+
+      if (!isFitsFileName(selectedPath)) {
+        setCaptureMessage('Use drag/drop or Load Preview Image for bitmap files.');
+        return;
+      }
+
+      await renderFitsPath(selectedPath);
+    } catch (caught) {
+      setCaptureMessage(caught instanceof Error ? caught.message : 'Unable to open FITS preview.');
+    }
+  };
+
+  const reloadLatestPreview = async () => {
+    const latestFrame = pipelineState.history[0];
+
+    if (!latestFrame?.destinationPath) {
+      setCaptureMessage('No transferred FITS frame is available yet.');
+      return;
+    }
+
+    await renderFitsPath(latestFrame.destinationPath, latestFrame.fileName, latestFrame.sizeBytes);
   };
 
   const updateStretch = (key: keyof StretchSettings, value: number) => {
@@ -2935,7 +3013,23 @@ function AcquisitionTab({
                 <span>{previewImage?.sourceKind || '-'}</span>
               </div>
             </div>
-            <div className={previewImage ? 'preview-box has-image' : 'preview-box'}>
+            <div
+              className={`${previewImage ? 'preview-box has-image' : 'preview-box'}${previewDragActive ? ' drag-active' : ''}`}
+              onDragEnter={(event) => {
+                event.preventDefault();
+                setPreviewDragActive(true);
+              }}
+              onDragOver={(event) => {
+                event.preventDefault();
+                setPreviewDragActive(true);
+              }}
+              onDragLeave={(event) => {
+                if (event.currentTarget === event.target) {
+                  setPreviewDragActive(false);
+                }
+              }}
+              onDrop={handlePreviewDrop}
+            >
               <div className="preview-canvas">
                 {previewImage ? (
                   <img
@@ -2956,15 +3050,26 @@ function AcquisitionTab({
                     }}
                   />
                 ) : (
-                  <div>No frame loaded</div>
+                  <div>{previewDragActive ? 'Drop image to preview' : 'No frame loaded'}</div>
                 )}
               </div>
+              {previewRendering ? <div className="preview-rendering">Rendering FITS...</div> : null}
             </div>
             <div className="preview-toolbar">
               <label className="file-button">
                 Load Preview Image
-                <input type="file" accept="image/png,image/jpeg,image/webp" onChange={handlePreviewFile} />
+                <input type="file" accept="image/png,image/jpeg,image/webp,image/bmp,.fits,.fit,.fts" onChange={handlePreviewFile} />
               </label>
+              <button type="button" disabled={previewRendering || !tauriClient.isDesktopRuntime()} onClick={() => void chooseFitsPreview()}>
+                Open FITS
+              </button>
+              <button
+                type="button"
+                disabled={previewRendering || !pipelineState.history[0]?.destinationPath || !tauriClient.isDesktopRuntime()}
+                onClick={() => void reloadLatestPreview()}
+              >
+                Reload Latest
+              </button>
               <button type="button" onClick={() => setPreviewImage(null)} disabled={!previewImage}>
                 Clear
               </button>
