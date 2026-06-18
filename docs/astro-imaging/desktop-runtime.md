@@ -116,6 +116,8 @@ The storage backend also exposes:
 
 The miniPC-side transfer agent lives at `agents/Starrunner.Agent`. It watches NINA output, exposes pending frames over HTTP, and keeps the main app free of Windows share assumptions. Protocol details live in `frame-transfer-protocol.md`.
 
+Desktop build and local release steps live in `desktop-packaging.md`.
+
 ## Initial Adapter Contracts
 
 `ninaClient`

@@ -39,10 +39,19 @@ Build and test the main pieces:
 
 ```bash
 npm run build
+npm run desktop:test
 cargo test --manifest-path src-tauri/Cargo.toml
 dotnet build agents/Starrunner.Agent/Starrunner.Agent.csproj
 npm run agent:test-metadata
 ```
+
+Build the packaged desktop app:
+
+```bash
+npm run desktop:build
+```
+
+See `docs/astro-imaging/desktop-packaging.md` for the current release checklist.
 
 ## MiniPC Agent
 
