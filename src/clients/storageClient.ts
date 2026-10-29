@@ -23,6 +23,8 @@ export type WriteFrameRequest = {
   frameNumber: number;
   capturedAt?: string;
   dataBase64: string;
+  expectedSha256: string;
+  expectedSizeBytes: number;
 };
 
 export type WriteFrameResult = {
@@ -39,11 +41,28 @@ export type WriteFrameResult = {
   manifest_path: string;
 };
 
+export type ExistingFrameResult = {
+  found: boolean;
+  frame: WriteFrameResult['frame'] | null;
+  manifest_path: string | null;
+};
+
+export type FitsAnalysis = {
+  width: number; height: number; valid_samples: number; excluded_samples: number;
+  mean: number | null; median: number | null; min: number | null; max: number | null; std_dev: number | null;
+  nonpositive_percent: number | null; saturation_limit: number | null;
+  saturation_source: string | null; saturation_percent: number | null;
+  histogram: number[];
+};
+
 export type RenderFitsPreviewResult = {
+  analysis: FitsAnalysis | null;
   data_url: string;
   width: number;
   height: number;
   source_path: string;
+  size_bytes: number;
+  header: Array<{ key: string; value: string }>;
   color: boolean;
   black_point: number;
   midtone: number;
@@ -199,22 +218,44 @@ async function writeFrame(request: WriteFrameRequest) {
       target_name: request.targetName,
       frame_number: request.frameNumber,
       captured_at: request.capturedAt ?? null,
-      data_base64: request.dataBase64
+      data_base64: request.dataBase64,
+      expected_sha256: request.expectedSha256,
+      expected_size_bytes: request.expectedSizeBytes
     }
   });
 }
 
-async function renderFitsPreview(path: string, stretch: { blackPoint: number; midtone: number; whitePoint: number }, autoStretch: boolean) {
-  return tauriClient.invokeIfDesktop<RenderFitsPreviewResult>('render_fits_preview', {
+async function findExistingFrame(sessionFolder: string, fileName: string, sha256: string, sizeBytes: number) {
+  return tauriClient.invokeIfDesktop<ExistingFrameResult>('find_existing_frame', {
+    request: {
+      session_folder: sessionFolder,
+      file_name: fileName,
+      sha256,
+      size_bytes: sizeBytes
+    }
+  });
+}
+
+async function renderFitsPreview(
+  path: string,
+  stretch: { blackPoint: number; midtone: number; whitePoint: number },
+  autoStretch: boolean,
+  maxSize = 1400,
+  selectedFile = false
+) {
+  return tauriClient.invokeIfDesktop<RenderFitsPreviewResult>(
+    selectedFile ? 'render_selected_fits_preview' : 'render_fits_preview',
+    {
     request: {
       path,
-      max_size: 1400,
+      max_size: maxSize,
       auto_stretch: autoStretch,
       black_point: stretch.blackPoint,
       midtone: stretch.midtone,
       white_point: stretch.whitePoint
     }
-  });
+    }
+  );
 }
 
 export const storageClient = {
@@ -234,5 +275,6 @@ export const storageClient = {
   previewFramePath,
   prepareSessionFolder,
   writeFrame,
+  findExistingFrame,
   renderFitsPreview
 };

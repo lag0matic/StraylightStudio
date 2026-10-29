@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import type { ChangeEvent, Dispatch, DragEvent, ReactNode, SetStateAction } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import {
@@ -29,7 +29,13 @@ import { phd2Client } from './clients/phd2Client';
 import type { Phd2Status, PhdGuideSample } from './clients/phd2Client';
 import { settingsClient } from './clients/settingsClient';
 import { storageClient } from './clients/storageClient';
+import type { FitsAnalysis } from './clients/storageClient';
+import { FitsHistogram, analysisNumber } from './FitsHistogram';
+import { SessionReview } from './SessionReview';
 import { tauriClient } from './clients/tauriClient';
+import { OperationGate } from './operationGate';
+import { connectionClient, defaultConnections, normalizeServerAddress } from './clients/connectionClient';
+import { networkFetch } from './clients/networkClient';
 import './styles.css';
 
 type CameraInfo = {
@@ -57,6 +63,8 @@ type MountInfo = {
   Name?: string;
   TrackingEnabled?: boolean;
   TrackingMode?: string;
+  TrackingModes?: string[];
+  CanSetTrackingEnabled?: boolean;
   Slewing?: boolean;
   AtPark?: boolean;
   RightAscensionString?: string;
@@ -103,6 +111,7 @@ type NinaEvent = {
   receivedAt: string;
   event: string;
   detail: string;
+  rawText?: string;
 };
 
 type AcquisitionEvent = {
@@ -113,14 +122,17 @@ type AcquisitionEvent = {
   imageType?: string;
   fileName?: string;
   detail: string;
+  rawText?: string;
 };
 
 type DiagnosticStatus = 'pending' | 'ok' | 'warn' | 'error';
 type CoolingTask = '' | 'cooling' | 'warming';
-type AcquisitionMonitorTab = 'stats' | 'recent' | 'planned' | 'pipeline';
+type AcquisitionMonitorTab = 'stats' | 'header' | 'recent' | 'planned' | 'pipeline';
 type AcquisitionPanelKey = 'guiding' | 'testExposure' | 'queue' | 'details';
 type PreviewZoomMode = 'fit' | 'manual';
+type PreviewRenderSize = 'fast' | 'balanced' | 'detail';
 type PipelineDetailTab = 'recent' | 'pending' | 'failed';
+type ReadinessStatus = 'ok' | 'warn' | 'block';
 
 type DiagnosticResult = {
   name: string;
@@ -136,6 +148,25 @@ type AcquisitionWorkspaceState = {
   fitsAutoStretch: boolean;
   previewZoomMode: PreviewZoomMode;
   previewZoom: number;
+};
+
+type ReadinessItem = {
+  key: string;
+  label: string;
+  detail: string;
+  targetTab: TabKey;
+  status: ReadinessStatus;
+  blocking?: boolean;
+};
+
+type AppSettings = {
+  ninaOrigin: string;
+  stellariumOrigin: string;
+  autoTransferEnabled: boolean;
+  autoLoadLatestFrame: boolean;
+  autoRenderFitsOnArrival: boolean;
+  previewRenderSize: PreviewRenderSize;
+  agentBase: string;
 };
 
 type CapabilityProbe = {
@@ -157,6 +188,7 @@ type TransferHistoryItem = {
   targetName: string;
   imageType: string;
   sourceKind: string;
+  transferStatus?: 'transferred' | 'already-present' | 'failed';
   fileName: string;
   destinationPath: string;
   sizeBytes: number;
@@ -173,7 +205,7 @@ type AcquisitionPipelineState = {
   checkedAt: string;
 };
 
-type TabKey = 'setup' | 'targeting' | 'acquisition' | 'logs';
+type TabKey = 'setup' | 'targeting' | 'acquisition' | 'review' | 'settings' | 'diagnostics';
 type ConnectionStatus = 'checking' | 'online' | 'offline' | 'demo';
 
 type ImportedTarget = {
@@ -222,6 +254,10 @@ type PreviewImage = {
   height?: number;
   sourcePath?: string;
   sourceKind?: 'bitmap' | 'fits';
+  fitsHeader?: Array<{ key: string; value: string }>;
+  analysis?: FitsAnalysis;
+  fitsBlack?: number;
+  fitsWhite?: number;
 };
 
 type CaptureStats = {
@@ -239,9 +275,27 @@ type SequenceRunState = {
   running: boolean;
   currentFrame: number;
   totalFrames: number;
+  savedFrames: number;
+  deliveredFramesAtStart: number;
+  phase: 'idle' | 'starting' | 'exposing' | 'saving' | 'waiting-transfer' | 'aborting' | 'complete' | 'aborted' | 'error';
   message: string;
   startedAt: string;
   completedAt: string;
+};
+
+type TargetPrepState = {
+  running: boolean;
+  status: 'idle' | 'unparking' | 'tracking' | 'slewing' | 'stopping' | 'ready' | 'stopped' | 'error';
+  message: string;
+  preparedTargetId: string;
+  updatedAt: string;
+  trace: Array<{
+    id: number;
+    at: string;
+    step: string;
+    detail: string;
+    status: 'pending' | 'ok' | 'warn' | 'error';
+  }>;
 };
 
 type StretchSettings = {
@@ -256,6 +310,13 @@ type PersistedPlannerState = {
   sequencePlan: SequencePlan;
   queue: QueueItem[];
   activeQueueId: string;
+};
+
+type DiagnosticsSessionState = {
+  diagnostics: DiagnosticResult[];
+  diagnosticsRunAt: string;
+  capabilities: CapabilityResult[];
+  capabilitiesRunAt: string;
 };
 
 type TppaSettings = {
@@ -281,7 +342,7 @@ type TppaWorkflowState = {
   instruction: string;
   lastMessage: string;
   lastUpdated: string;
-  rawEvents: Array<{ id: number; receivedAt: string; event: string; detail: string }>;
+  rawEvents: Array<{ id: number; receivedAt: string; event: string; detail: string; rawText?: string }>;
 };
 
 const defaultTppaWorkflow: TppaWorkflowState = {
@@ -294,8 +355,6 @@ const defaultTppaWorkflow: TppaWorkflowState = {
   rawEvents: []
 };
 
-const { apiBase, wsUrl, tppaWsUrl } = ninaClient.urls;
-const stellariumBase = import.meta.env.VITE_STELLARIUM_HTTP_BASE || '/stellarium-api';
 const capabilityProbes: CapabilityProbe[] = [
   {
     name: 'Core API',
@@ -369,13 +428,13 @@ const capabilityProbes: CapabilityProbe[] = [
   {
     name: 'TPPA',
     kind: 'websocket',
-    socketUrl: tppaWsUrl,
+    socketUrl: 'tppa',
     commandSurface: 'TPPA WebSocket commands'
   },
   {
     name: 'Event Stream',
     kind: 'websocket',
-    socketUrl: wsUrl,
+    socketUrl: 'events',
     commandSurface: 'NINA event WebSocket'
   }
 ];
@@ -426,16 +485,40 @@ const defaultAcquisitionWorkspace: AcquisitionWorkspaceState = {
   previewZoom: 1
 };
 
+const appSettingsStorageKey = 'straylight-app-settings-v1';
+const diagnosticsSessionStorageKey = 'straylight-diagnostics-session-v1';
+
+const defaultAppSettings: AppSettings = {
+  ...defaultConnections,
+  autoTransferEnabled: true,
+  autoLoadLatestFrame: true,
+  autoRenderFitsOnArrival: true,
+  previewRenderSize: 'balanced',
+  agentBase: frameTransferClient.defaultAgentBase
+};
+
 const defaultSequenceRun: SequenceRunState = {
   running: false,
   currentFrame: 0,
   totalFrames: 0,
+  savedFrames: 0,
+  deliveredFramesAtStart: 0,
+  phase: 'idle',
   message: 'Idle',
   startedAt: '-',
   completedAt: '-'
 };
 
-function loadAutoTransferEnabled() {
+const defaultTargetPrep: TargetPrepState = {
+  running: false,
+  status: 'idle',
+  message: 'Not prepared',
+  preparedTargetId: '',
+  updatedAt: '-',
+  trace: []
+};
+
+function loadLegacyAutoTransferEnabled() {
   if (!settingsClient.loadBoolean(autoTransferDefaultedStorageKey)) {
     settingsClient.saveBoolean(autoTransferStorageKey, true);
     settingsClient.saveBoolean(autoTransferDefaultedStorageKey, true);
@@ -443,6 +526,53 @@ function loadAutoTransferEnabled() {
   }
 
   return settingsClient.loadBoolean(autoTransferStorageKey, true);
+}
+
+function isPreviewRenderSize(value: unknown): value is PreviewRenderSize {
+  return value === 'fast' || value === 'balanced' || value === 'detail';
+}
+
+function loadAppSettings(overrides?: Partial<AppSettings>): AppSettings {
+  const storedAgent = settingsClient.loadJson(frameAgentStorageKey, { base: frameTransferClient.defaultAgentBase });
+  const legacyAgentBase = typeof storedAgent.base === 'string' ? storedAgent.base : frameTransferClient.defaultAgentBase;
+  const stored = settingsClient.loadJson<Partial<AppSettings>>(appSettingsStorageKey, {});
+  const merged = { ...stored, ...overrides };
+
+  return {
+    ninaOrigin: typeof merged.ninaOrigin === 'string' ? merged.ninaOrigin : defaultConnections.ninaOrigin,
+    stellariumOrigin: typeof merged.stellariumOrigin === 'string' ? merged.stellariumOrigin : defaultConnections.stellariumOrigin,
+    autoTransferEnabled: typeof merged.autoTransferEnabled === 'boolean'
+      ? merged.autoTransferEnabled
+      : loadLegacyAutoTransferEnabled(),
+    autoLoadLatestFrame: typeof merged.autoLoadLatestFrame === 'boolean'
+      ? merged.autoLoadLatestFrame
+      : defaultAppSettings.autoLoadLatestFrame,
+    autoRenderFitsOnArrival: typeof merged.autoRenderFitsOnArrival === 'boolean'
+      ? merged.autoRenderFitsOnArrival
+      : defaultAppSettings.autoRenderFitsOnArrival,
+    previewRenderSize: isPreviewRenderSize(merged.previewRenderSize)
+      ? merged.previewRenderSize
+      : defaultAppSettings.previewRenderSize,
+    agentBase: typeof merged.agentBase === 'string' && merged.agentBase.trim()
+      ? merged.agentBase.trim()
+      : legacyAgentBase
+  };
+}
+
+function loadAutoTransferEnabled() {
+  return loadAppSettings().autoTransferEnabled;
+}
+
+function previewRenderMaxSize(size: PreviewRenderSize) {
+  if (size === 'fast') {
+    return 900;
+  }
+
+  if (size === 'detail') {
+    return 1800;
+  }
+
+  return 1400;
 }
 
 const demoEquipment: EquipmentInfo = {
@@ -498,18 +628,92 @@ const demoAutofocus: LastAutofocus = {
   Method: 'Hyperbolic'
 };
 
-const demoEvents: NinaEvent[] = [
-  { id: 3, receivedAt: '22:17:08', event: 'ImageSaved', detail: 'M31_LIGHT_0003.fit | HFR: 2.6 | Stars: 184' },
-  { id: 2, receivedAt: '22:14:02', event: 'AutoFocusFinished', detail: 'Calculated focus point: 5553' },
-  { id: 1, receivedAt: '22:10:31', event: 'SequenceStarting', detail: 'Target: M31 | Exposure: 180s | Count: 60' }
+function demoSocketEnvelope(response: unknown) {
+  return {
+    Response: response,
+    Error: 'string',
+    StatusCode: 200,
+    Success: true,
+    Type: 'Socket'
+  };
+}
+
+function demoImageSaveEvent(index: number, receivedAt: string, hfr: number, stars: number) {
+  return demoSocketEnvelope({
+    Event: 'IMAGE-SAVE',
+    ImageStatistics: {
+      ExposureTime: 180,
+      Index: index,
+      Filter: 'L',
+      RmsText: 'string',
+      Temperature: -10,
+      CameraName: 'ZWO ASI183MC Pro',
+      Gain: 200,
+      Offset: 8,
+      Date: `2026-06-17T${receivedAt}`,
+      TelescopeName: 'RedCat 51',
+      FocalLength: 250,
+      StDev: 0,
+      Mean: 0,
+      Median: 1204 + index,
+      Stars: stars,
+      HFR: hfr,
+      IsBayered: true,
+      Min: 0,
+      Max: 65535,
+      HFRStDev: 0,
+      TargetName: 'M 31',
+      Filename: `M 31_-10.00_180.00_LIGHT_${String(index).padStart(4, '0')}.fits`
+    }
+  });
+}
+
+const demoRawSocketEvents: Array<{ id: number; receivedAt: string; raw: unknown }> = [
+  { id: 7, receivedAt: '22:21:05', raw: demoImageSaveEvent(4, '22:21:05', 2.7, 191) },
+  { id: 6, receivedAt: '22:18:02', raw: demoImageSaveEvent(3, '22:18:02', 2.6, 184) },
+  { id: 5, receivedAt: '22:15:00', raw: demoImageSaveEvent(2, '22:15:00', 2.8, 176) },
+  { id: 4, receivedAt: '22:14:31', raw: demoSocketEnvelope({ Event: 'AUTOFOCUS-FINISHED' }) },
+  { id: 3, receivedAt: '22:14:02', raw: demoSocketEnvelope({ Event: 'AUTOFOCUS-POINT-ADDED', ImageStatistics: { Position: 5553, HFR: 2.18 } }) },
+  { id: 2, receivedAt: '22:12:00', raw: demoImageSaveEvent(1, '22:12:00', 2.9, 168) },
+  {
+    id: 1,
+    receivedAt: '22:10:31',
+    raw: demoSocketEnvelope({
+      Event: 'TS-NEWTARGETSTART',
+      TargetName: 'M 31',
+      ProjectName: 'Straylight Demo',
+      Coordinates: {
+        RA: 0.711,
+        RAString: '00h 42m 44s',
+        RADegrees: 10.6847,
+        Dec: 41.269,
+        DecString: '+41d 16m 09s',
+        Epoch: 'JNOW',
+        DateTime: {
+          Now: '2026-06-17T22:10:31',
+          UtcNow: '2026-06-18T02:10:31Z'
+        }
+      },
+      Rotation: 0,
+      TargetEndTime: '2026-06-18T01:30:00Z'
+    })
+  }
 ];
 
-const demoAcquisitionEvents: AcquisitionEvent[] = [
-  { id: 4, receivedAt: '22:21:05', event: 'ImageSaved', target: 'M 31', imageType: 'LIGHT', fileName: 'M 31_-10.00_180.00_LIGHT_0004.fits', detail: 'target M 31 | type LIGHT | HFR 2.7 | stars 191' },
-  { id: 3, receivedAt: '22:18:02', event: 'ImageSaved', target: 'M 31', imageType: 'LIGHT', fileName: 'M 31_-10.00_180.00_LIGHT_0003.fits', detail: 'target M 31 | type LIGHT | HFR 2.6 | stars 184' },
-  { id: 2, receivedAt: '22:15:00', event: 'ImageSaved', target: 'M 31', imageType: 'LIGHT', fileName: 'M 31_-10.00_180.00_LIGHT_0002.fits', detail: 'target M 31 | type LIGHT | HFR 2.8 | stars 176' },
-  { id: 1, receivedAt: '22:12:00', event: 'ImageSaved', target: 'M 31', imageType: 'LIGHT', fileName: 'M 31_-10.00_180.00_LIGHT_0001.fits', detail: 'target M 31 | type LIGHT | HFR 2.9 | stars 168' }
-];
+const demoEvents: NinaEvent[] = demoRawSocketEvents.map(({ id, receivedAt, raw }) => {
+  const label = eventLabel(raw);
+  return {
+    id,
+    receivedAt,
+    event: label.event,
+    detail: label.detail,
+    rawText: eventRawText(raw)
+  };
+});
+
+const demoAcquisitionEvents: AcquisitionEvent[] = demoRawSocketEvents
+  .map(({ id, receivedAt, raw }) => acquisitionEventFromRaw(raw, id, receivedAt))
+  .filter((event): event is AcquisitionEvent => event !== null);
 
 const demoPipelineState: AcquisitionPipelineState = {
   health: {
@@ -616,9 +820,27 @@ const demoTppaWorkflow: TppaWorkflowState = {
   lastMessage: 'Demo TPPA adjustment available.',
   lastUpdated: '22:19:34',
   rawEvents: [
-    { id: 3, receivedAt: '22:19:34', event: 'Adjustment', detail: 'Azimuth -1.42 | Altitude 0.84 | Total 1.65' },
-    { id: 2, receivedAt: '22:18:59', event: 'Solve', detail: 'Point 3 solved successfully.' },
-    { id: 1, receivedAt: '22:17:42', event: 'Start', detail: 'Demo TPPA started at current position.' }
+    {
+      id: 3,
+      receivedAt: '22:19:34',
+      event: 'Alignment Error',
+      detail: 'Azimuth -1.42 | Altitude 0.84 | Total 1.65',
+      rawText: '{\n  "Response": {\n    "AzimuthError": -1.42,\n    "AltitudeError": 0.84,\n    "TotalError": 1.65\n  },\n  "Error": "string",\n  "StatusCode": 200,\n  "Success": true,\n  "Type": "Socket"\n}'
+    },
+    {
+      id: 2,
+      receivedAt: '22:18:59',
+      event: 'Progress',
+      detail: 'Moving to next point | Progress 0.75',
+      rawText: '{\n  "Response": {\n    "Status": "Moving to next point",\n    "Progress": 0.75\n  },\n  "Error": "string",\n  "StatusCode": 200,\n  "Success": true,\n  "Type": "Socket"\n}'
+    },
+    {
+      id: 1,
+      receivedAt: '22:17:42',
+      event: 'Process Confirmation',
+      detail: 'started procedure',
+      rawText: '{\n  "Response": "started procedure",\n  "Error": "string",\n  "StatusCode": 200,\n  "Success": true,\n  "Type": "Socket"\n}'
+    }
   ]
 };
 
@@ -639,14 +861,7 @@ const demoTarget: ImportedTarget = {
 };
 
 async function fetchWithTimeout(url: string, timeoutMs = 3000) {
-  const controller = new AbortController();
-  const timeout = window.setTimeout(() => controller.abort(), timeoutMs);
-
-  try {
-    return await fetch(url, { signal: controller.signal });
-  } finally {
-    window.clearTimeout(timeout);
-  }
+  return networkFetch(url, timeoutMs);
 }
 
 function formatValue(value: unknown, fallback = '-') {
@@ -663,6 +878,28 @@ function formatValue(value: unknown, fallback = '-') {
   }
 
   return String(value);
+}
+
+function transferStatusFor(item: TransferHistoryItem) {
+  if (item.transferStatus) {
+    return item.transferStatus;
+  }
+
+  return item.sourceKind === 'already-present' ? 'already-present' : 'transferred';
+}
+
+function transferStatusLabel(item: TransferHistoryItem) {
+  const status = transferStatusFor(item);
+
+  if (status === 'already-present') {
+    return 'Already present';
+  }
+
+  if (status === 'failed') {
+    return 'Failed';
+  }
+
+  return 'Transferred';
 }
 
 function formatTemp(value: unknown) {
@@ -748,6 +985,43 @@ function formatTppaMove(axis: 'azimuth' | 'altitude', value: number | undefined)
   return value >= 0 ? `Move up ${magnitude}` : `Move down ${magnitude}`;
 }
 
+function formatTppaInstruction(azimuthError: number | undefined, altitudeError: number | undefined) {
+  if (typeof azimuthError !== 'number' || typeof altitudeError !== 'number') {
+    return '';
+  }
+
+  return `${formatTppaMove('azimuth', azimuthError)}; ${formatTppaMove('altitude', altitudeError)}.`;
+}
+
+function summarizeObjectValue(value: unknown, fallback = 'OK'): string {
+  if (value === undefined || value === null || value === '') {
+    return fallback;
+  }
+
+  if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
+    return String(value);
+  }
+
+  if (Array.isArray(value)) {
+    if (!value.length) {
+      return 'none';
+    }
+
+    return value.slice(0, 4).map((item: unknown) => summarizeObjectValue(item, 'object')).join(', ');
+  }
+
+  if (typeof value !== 'object') {
+    return String(value);
+  }
+
+  const entries: string[] = Object.entries(value as Record<string, unknown>)
+    .filter(([, entry]) => entry !== undefined && entry !== null && entry !== '')
+    .slice(0, 4)
+    .map(([key, entry]: [string, unknown]) => `${key}: ${summarizeObjectValue(entry, 'object')}`);
+
+  return entries.length ? entries.join(' | ') : fallback;
+}
+
 function summarizeEnvelopeResponse(path: string, body: ApiEnvelope<unknown>) {
   if (path === 'equipment/info' && body.Response && typeof body.Response === 'object') {
     const equipment = body.Response as Partial<EquipmentInfo>;
@@ -756,6 +1030,21 @@ function summarizeEnvelopeResponse(path: string, body: ApiEnvelope<unknown>) {
     const focuser = equipment.Focuser?.Connected ? 'focuser on' : 'focuser off';
     const guider = equipment.Guider?.Connected ? 'guider on' : 'guider off';
     return `${camera}, ${mount}, ${focuser}, ${guider}`;
+  }
+
+  if (path === 'sequence/state' && body.Response && typeof body.Response === 'object') {
+    const sequenceState = body.Response as Record<string, unknown>;
+    const flattened = flattenRecord(sequenceState);
+    const status = findValueTextByKey(flattened, ['status'])
+      || findValueTextByKey(flattened, ['state'])
+      || findValueTextByKey(flattened, ['statusstring']);
+    const target = findValueTextByKey(flattened, ['targetname'])
+      || findValueTextByKey(flattened, ['target']);
+    const running = findValueTextByKey(flattened, ['running'])
+      || findValueTextByKey(flattened, ['started']);
+
+    return [status, target ? `target ${target}` : '', running ? `running ${running}` : ''].filter(Boolean).join(' | ')
+      || summarizeObjectValue(body.Response);
   }
 
   if (body.Response === undefined || body.Response === null || body.Response === '') {
@@ -767,7 +1056,7 @@ function summarizeEnvelopeResponse(path: string, body: ApiEnvelope<unknown>) {
   }
 
   if (Array.isArray(body.Response)) {
-    return body.Response.length ? body.Response.map((item) => String(item)).join(', ') : 'none';
+    return summarizeObjectValue(body.Response, 'none');
   }
 
   if (body.Response && typeof body.Response === 'object' && 'Connected' in body.Response) {
@@ -776,7 +1065,7 @@ function summarizeEnvelopeResponse(path: string, body: ApiEnvelope<unknown>) {
     return `${device.Connected ? 'connected' : 'disconnected'}${deviceName ? ` - ${deviceName}` : ''}`;
   }
 
-  return 'OK';
+  return summarizeObjectValue(body.Response);
 }
 
 async function runHttpDiagnostic(name: string, path: string): Promise<DiagnosticResult> {
@@ -810,7 +1099,7 @@ function runSocketDiagnostic(name: string, socketUrl: string): Promise<Diagnosti
 
   return new Promise((resolve) => {
     let settled = false;
-    const socket = socketUrl === tppaWsUrl ? ninaClient.openTppaSocket() : ninaClient.openEventSocket();
+    const socket = socketUrl === 'tppa' ? ninaClient.openTppaSocket() : ninaClient.openEventSocket();
     const timeout = window.setTimeout(() => {
       finish({ name, status: 'error', detail: 'Timed out' });
     }, 6000);
@@ -836,7 +1125,7 @@ function runSocketDiagnostic(name: string, socketUrl: string): Promise<Diagnosti
 }
 
 function runWebSocketDiagnostic(): Promise<DiagnosticResult> {
-  return runSocketDiagnostic('Event WebSocket', wsUrl);
+  return runSocketDiagnostic('Event WebSocket', 'events');
 }
 
 async function runCapabilityHttpProbe(probe: CapabilityProbe): Promise<CapabilityResult> {
@@ -880,7 +1169,7 @@ async function runCapabilityHttpProbe(probe: CapabilityProbe): Promise<Capabilit
 
 async function runCapabilityProbe(probe: CapabilityProbe): Promise<CapabilityResult> {
   if (probe.kind === 'websocket') {
-    const result = await runSocketDiagnostic(probe.name, probe.socketUrl ?? wsUrl);
+    const result = await runSocketDiagnostic(probe.name, probe.socketUrl ?? 'events');
     return { ...result, commandSurface: probe.commandSurface };
   }
 
@@ -1012,12 +1301,58 @@ function stretchFilter(settings: StretchSettings) {
   return `contrast(${contrast.toFixed(2)}) brightness(${brightness.toFixed(2)})`;
 }
 
+function normalizeTabKey(value: unknown): TabKey | undefined {
+  if (value === 'logs') {
+    return 'diagnostics';
+  }
+
+  return value === 'setup'
+    || value === 'targeting'
+    || value === 'acquisition'
+    || value === 'review'
+    || value === 'settings'
+    || value === 'diagnostics'
+    ? value
+    : undefined;
+}
+
 function loadPlannerState(): Partial<PersistedPlannerState> {
-  return settingsClient.loadJson<Partial<PersistedPlannerState>>(plannerStorageKey, {});
+  const stored = settingsClient.loadJson<Record<string, unknown>>(plannerStorageKey, {});
+  const activeTab = normalizeTabKey(stored.activeTab);
+
+  return {
+    ...stored,
+    activeTab
+  } as Partial<PersistedPlannerState>;
+}
+
+function loadDiagnosticsSessionState(): DiagnosticsSessionState {
+  try {
+    const raw = window.sessionStorage.getItem(diagnosticsSessionStorageKey);
+    const parsed = raw ? JSON.parse(raw) as Partial<DiagnosticsSessionState> : {};
+
+    return {
+      diagnostics: Array.isArray(parsed.diagnostics) ? parsed.diagnostics : [],
+      diagnosticsRunAt: typeof parsed.diagnosticsRunAt === 'string' ? parsed.diagnosticsRunAt : '',
+      capabilities: Array.isArray(parsed.capabilities) ? parsed.capabilities : [],
+      capabilitiesRunAt: typeof parsed.capabilitiesRunAt === 'string' ? parsed.capabilitiesRunAt : ''
+    };
+  } catch {
+    return {
+      diagnostics: [],
+      diagnosticsRunAt: '',
+      capabilities: [],
+      capabilitiesRunAt: ''
+    };
+  }
+}
+
+function saveDiagnosticsSessionState(state: DiagnosticsSessionState) {
+  window.sessionStorage.setItem(diagnosticsSessionStorageKey, JSON.stringify(state));
 }
 
 function isAcquisitionMonitorTab(value: unknown): value is AcquisitionMonitorTab {
-  return value === 'stats' || value === 'recent' || value === 'planned' || value === 'pipeline';
+  return value === 'stats' || value === 'header' || value === 'recent' || value === 'planned' || value === 'pipeline';
 }
 
 function normalizeStretch(value: unknown): StretchSettings {
@@ -1111,6 +1446,18 @@ function surveyImageUrl(target: ImportedTarget) {
   return `https://alasky.cds.unistra.fr/hips-image-services/hips2fits?${params.toString()}`;
 }
 
+function eventRawText(raw: unknown) {
+  if (typeof raw === 'string') {
+    return raw;
+  }
+
+  try {
+    return JSON.stringify(raw, null, 2);
+  } catch {
+    return String(raw);
+  }
+}
+
 function eventLabel(raw: unknown) {
   if (!raw || typeof raw !== 'object') {
     return { event: 'Message', detail: String(raw) };
@@ -1183,38 +1530,78 @@ function findTextByKey(entries: Array<[string, unknown]>, include: string[]) {
   return typeof match?.[1] === 'string' ? match[1] : undefined;
 }
 
-function tppaStateFromRaw(raw: unknown, id: number, receivedAt: string): Partial<TppaWorkflowState> {
+function findValueTextByKey(entries: Array<[string, unknown]>, include: string[]) {
+  const match = entries.find(([key, value]) => {
+    const lower = key.toLowerCase();
+    return value !== undefined && value !== null && value !== '' && include.some((part) => lower.includes(part));
+  });
+
+  return match ? String(match[1]) : undefined;
+}
+
+function inferImageTypeFromFilename(fileName: string | undefined) {
+  const upper = fileName?.toUpperCase() ?? '';
+  return ['LIGHT', 'DARK', 'FLAT', 'BIAS'].find((type) => upper.includes(`_${type}_`) || upper.includes(`-${type}-`) || upper.includes(`\\${type}\\`));
+}
+
+function inspectEvent(raw: unknown) {
   const payload = eventPayload(raw) ?? (raw && typeof raw === 'object' ? raw as Record<string, unknown> : { Message: String(raw) });
   const label = eventLabel(raw);
   const entries = flattenRecord(payload);
-  const event = asEventText(payload.Event) || label.event;
-  const status = findTextByKey(entries, ['status', 'state', 'message']) || label.detail || event;
-  const instruction = findTextByKey(entries, ['instruction', 'adjustment', 'move', 'direction']) || '';
-  const azimuthError = findNumberByKey(entries, ['azimuth', 'error']);
-  const altitudeError = findNumberByKey(entries, ['altitude', 'error']);
-  const totalError = findNumberByKey(entries, ['total', 'error']) ?? findNumberByKey(entries, ['polar', 'error']);
 
   return {
-    step: event,
+    payload,
+    entries,
+    event: asEventText(payload.Event) || label.event,
+    detail: label.detail,
+    rawText: eventRawText(raw)
+  };
+}
+
+function tppaStateFromRaw(raw: unknown, id: number, receivedAt: string): Partial<TppaWorkflowState> {
+  const inspected = inspectEvent(raw);
+  const azimuthError = findNumberByKey(inspected.entries, ['azimuth', 'error']);
+  const altitudeError = findNumberByKey(inspected.entries, ['altitude', 'error']);
+  const totalError = findNumberByKey(inspected.entries, ['total', 'error']) ?? findNumberByKey(inspected.entries, ['polar', 'error']);
+  const progress = findNumberByKey(inspected.entries, ['progress']);
+  const responseText = asEventText(inspected.payload.Response);
+  const inferredEvent = typeof azimuthError === 'number' || typeof altitudeError === 'number'
+    ? 'Alignment Error'
+    : typeof progress === 'number'
+      ? 'Progress'
+      : responseText
+        ? 'Process Confirmation'
+        : inspected.event;
+  const status = findTextByKey(inspected.entries, ['status', 'state', 'message'])
+    || responseText
+    || (inferredEvent === 'Alignment Error' ? 'Alignment error received.' : inspected.detail || inspected.event);
+  const instruction = findTextByKey(inspected.entries, ['instruction', 'adjustment', 'move', 'direction'])
+    || formatTppaInstruction(azimuthError, altitudeError);
+
+  return {
+    step: inferredEvent,
     status,
     instruction,
     azimuthError,
     altitudeError,
     totalError,
-    lastMessage: label.detail || JSON.stringify(payload),
+    lastMessage: inspected.detail || inspected.rawText,
     lastUpdated: receivedAt,
     rawEvents: [{
       id,
       receivedAt,
-      event,
-      detail: label.detail || JSON.stringify(payload)
+      event: inferredEvent,
+      detail: inspected.detail || inspected.rawText,
+      rawText: inspected.rawText
     }]
   };
 }
 
 function acquisitionEventFromRaw(raw: unknown, id: number, receivedAt: string): AcquisitionEvent | null {
-  const payload = eventPayload(raw);
-  const label = eventLabel(raw);
+  const inspected = inspectEvent(raw);
+  const payload = inspected.payload;
+  const entries = inspected.entries;
+  const label = { event: inspected.event, detail: inspected.detail };
   const event = asEventText(payload?.Event) || label.event;
   const upperEvent = event.toUpperCase();
   const relevant =
@@ -1222,23 +1609,28 @@ function acquisitionEventFromRaw(raw: unknown, id: number, receivedAt: string): 
     upperEvent.includes('CAPTURE') ||
     upperEvent.includes('SEQUENCE') ||
     upperEvent.includes('ADV-SEQ') ||
-    upperEvent.includes('TS-TARGET');
+    upperEvent.includes('TS-TARGET') ||
+    upperEvent.includes('TS-NEWTARGET');
 
   if (!relevant) {
     return null;
   }
 
-  const target = asEventText(payload?.TargetName ?? payload?.Target ?? payload?.Name);
-  const imageType = asEventText(payload?.ImageType ?? payload?.Type);
-  const fileName = asEventText(payload?.FileName ?? payload?.Filename ?? payload?.Path);
+  const target = findValueTextByKey(entries, ['targetname']) || findValueTextByKey(entries, ['target']) || findValueTextByKey(entries, ['name']);
+  const fileName = findValueTextByKey(entries, ['filename']) || findValueTextByKey(entries, ['file name']) || findValueTextByKey(entries, ['path']);
+  const imageType = findValueTextByKey(entries, ['imagetype']) || inferImageTypeFromFilename(fileName);
+  const exposure = findValueTextByKey(entries, ['exposuretime']) || findValueTextByKey(entries, ['exposure']);
+  const hfr = findValueTextByKey(entries, ['hfr']);
+  const stars = findValueTextByKey(entries, ['stars']);
+  const median = findValueTextByKey(entries, ['median']);
   const details = [
     target ? `target ${target}` : '',
     imageType ? `type ${imageType}` : '',
     fileName ? fileName : '',
-    asEventText(payload?.ExposureTime ?? payload?.Exposure) ? `exposure ${asEventText(payload?.ExposureTime ?? payload?.Exposure)}` : '',
-    asEventText(payload?.HFR) ? `HFR ${asEventText(payload?.HFR)}` : '',
-    asEventText(payload?.Stars) ? `stars ${asEventText(payload?.Stars)}` : '',
-    asEventText(payload?.Median) ? `median ${asEventText(payload?.Median)}` : '',
+    exposure ? `exposure ${exposure}` : '',
+    hfr ? `HFR ${hfr}` : '',
+    stars ? `stars ${stars}` : '',
+    median ? `median ${median}` : '',
     label.detail
   ].filter(Boolean);
 
@@ -1249,11 +1641,14 @@ function acquisitionEventFromRaw(raw: unknown, id: number, receivedAt: string): 
     target,
     imageType,
     fileName,
-    detail: details[0] ? details.join(' | ') : 'Event received'
+    detail: details[0] ? details.join(' | ') : 'Event received',
+    rawText: inspected.rawText
   };
 }
 
-function useNinaStatus(demoMode: boolean) {
+function useNinaStatus(demoMode: boolean, enabled: boolean) {
+  const connections = useSyncExternalStore(connectionClient.subscribe, connectionClient.getSnapshot);
+  const refreshId = useRef(0);
   const [equipment, setEquipment] = useState<EquipmentInfo | null>(null);
   const [lastAutofocus, setLastAutofocus] = useState<LastAutofocus | null>(null);
   const [lastAutofocusError, setLastAutofocusError] = useState('');
@@ -1264,6 +1659,8 @@ function useNinaStatus(demoMode: boolean) {
   const [lastRefresh, setLastRefresh] = useState('');
 
   const refresh = useCallback(async () => {
+    const id = ++refreshId.current;
+    if (!enabled) return;
     if (demoMode) {
       setEquipment(demoEquipment);
       setLastAutofocus(demoAutofocus);
@@ -1285,6 +1682,7 @@ function useNinaStatus(demoMode: boolean) {
         ninaClient.getJson<EquipmentInfo>('equipment/info')
       ]);
 
+      if (id !== refreshId.current || connections !== connectionClient.getSnapshot()) return;
       if (!apiResult.response.ok || !ninaResult.response.ok || !equipmentResult.response.ok) {
         throw new Error('NINA API returned an unexpected response.');
       }
@@ -1303,6 +1701,7 @@ function useNinaStatus(demoMode: boolean) {
 
       try {
         const { body: afJson } = await ninaClient.getJson<LastAutofocus | string>('equipment/focuser/last-af');
+        if (id !== refreshId.current || connections !== connectionClient.getSnapshot()) return;
 
         if (afJson.Success && typeof afJson.Response === 'object') {
           setLastAutofocus(afJson.Response);
@@ -1312,23 +1711,31 @@ function useNinaStatus(demoMode: boolean) {
           setLastAutofocusError(afJson.Error || 'No autofocus run available.');
         }
       } catch {
+        if (id !== refreshId.current || connections !== connectionClient.getSnapshot()) return;
         setLastAutofocus(null);
         setLastAutofocusError('Last autofocus unavailable.');
       }
 
+      if (id !== refreshId.current || connections !== connectionClient.getSnapshot()) return;
       setHttpStatus('online');
       setLastRefresh(new Date().toLocaleTimeString());
     } catch (caught) {
+      if (id !== refreshId.current || connections !== connectionClient.getSnapshot()) return;
       setEquipment(null);
       setHttpStatus('offline');
       setError(caught instanceof Error && caught.name !== 'AbortError' ? caught.message : 'Unable to reach NINA API.');
     }
-  }, [demoMode]);
+  }, [demoMode, enabled, connections]);
 
   useEffect(() => {
+    setEquipment(null);
+    setLastAutofocus(null);
+    setHttpStatus('checking');
+    setApiVersion('-');
+    setNinaVersion('-');
     void refresh();
     const timer = window.setInterval(() => void refresh(), 10000);
-    return () => window.clearInterval(timer);
+    return () => { ++refreshId.current; window.clearInterval(timer); };
   }, [refresh]);
 
   return {
@@ -1345,6 +1752,7 @@ function useNinaStatus(demoMode: boolean) {
 }
 
 function useNinaEvents(enabled: boolean) {
+  const connections = useSyncExternalStore(connectionClient.subscribe, connectionClient.getSnapshot);
   const nextId = useRef(1);
   const nextAcquisitionId = useRef(1);
   const [socketStatus, setSocketStatus] = useState<'idle' | 'connecting' | 'open' | 'closed' | 'error'>('idle');
@@ -1358,13 +1766,14 @@ function useNinaEvents(enabled: boolean) {
     }
 
     let closedByEffect = false;
-    const socket = ninaClient.openEventSocket();
+    const socket = ninaClient.openEventSocket(true);
 
     setSocketStatus('connecting');
 
-    socket.addEventListener('open', () => setSocketStatus('open'));
+    socket.addEventListener('open', () => { if (!closedByEffect) setSocketStatus('open'); });
 
     socket.addEventListener('message', (message) => {
+      if (closedByEffect) return;
       let raw: unknown = message.data;
 
       try {
@@ -1380,7 +1789,8 @@ function useNinaEvents(enabled: boolean) {
           id: nextId.current++,
           receivedAt,
           event: label.event,
-          detail: label.detail
+          detail: label.detail,
+          rawText: eventRawText(raw)
         },
         ...current
       ].slice(0, 100));
@@ -1393,7 +1803,7 @@ function useNinaEvents(enabled: boolean) {
       }
     });
 
-    socket.addEventListener('error', () => setSocketStatus('error'));
+    socket.addEventListener('error', () => { if (!closedByEffect) setSocketStatus('error'); });
     socket.addEventListener('close', () => {
       if (!closedByEffect) {
         setSocketStatus('closed');
@@ -1404,7 +1814,7 @@ function useNinaEvents(enabled: boolean) {
       closedByEffect = true;
       socket.close();
     };
-  }, [enabled]);
+  }, [enabled, connections]);
 
   return { socketStatus, events, acquisitionEvents };
 }
@@ -1435,6 +1845,7 @@ function StatusBar({
   onRefresh: () => void;
   onToggleDemo: () => void;
 }) {
+  const connections = useSyncExternalStore(connectionClient.subscribe, connectionClient.getSnapshot);
   const camera = equipment?.Camera;
   const mount = equipment?.Mount;
   const focuser = equipment?.Focuser;
@@ -1444,7 +1855,7 @@ function StatusBar({
     <header className="statusbar">
       <div className="brand-block">
         <h1>Straylight Studio</h1>
-        <div className="host-line">Starrunner.local</div>
+        <div className="host-line">{new URL(connections.ninaOrigin).host}</div>
       </div>
       <div className="rig-strip">
         <div className={httpStatus === 'online' || httpStatus === 'demo' ? 'connection online' : httpStatus === 'checking' ? 'connection wait' : 'connection offline'}>
@@ -1453,6 +1864,7 @@ function StatusBar({
         </div>
         <StatusLight label="Camera" active={camera?.Connected} />
         <StatusLight label="Mount" active={mount?.Connected} />
+        <StatusLight label="Tracking" active={mount?.TrackingEnabled} />
         <StatusLight label="Focuser" active={focuser?.Connected} />
         <StatusLight label="Guiding" active={guider?.Connected} />
         <div className={socketStatus === 'open' ? 'connection online' : 'connection offline'}>Events {socketStatus}</div>
@@ -1536,6 +1948,7 @@ function SetupTab({
   coolingTask,
   runCameraCooling,
   runAutofocus,
+  runMountTracking,
   runTppa,
   tppaSettings,
   tppaWorkflow,
@@ -1553,6 +1966,7 @@ function SetupTab({
   coolingTask: CoolingTask;
   runCameraCooling: (action: 'cool' | 'warm' | 'cancel-cool' | 'cancel-warm') => Promise<void>;
   runAutofocus: (cancel?: boolean) => Promise<void>;
+  runMountTracking: (mode: 0 | 4) => Promise<void>;
   runTppa: (action: string) => Promise<void>;
   tppaSettings: TppaSettings;
   tppaWorkflow: TppaWorkflowState;
@@ -1820,15 +2234,52 @@ function SetupTab({
       </Panel>
 
       <Panel title="Mount and Guide" icon={<Telescope size={17} />}>
+        <div className="mount-status-row">
+          <div>
+            <span>Tracking</span>
+            <strong>{mount?.TrackingEnabled ? mount.TrackingMode || 'Enabled' : mount?.Connected ? 'Off' : 'Unavailable'}</strong>
+          </div>
+          <div>
+            <span>Slewing</span>
+            <strong>{mount?.Slewing ? 'Yes' : 'No'}</strong>
+          </div>
+          <div>
+            <span>Park</span>
+            <strong>{mount?.AtPark ? 'Parked' : 'Clear'}</strong>
+          </div>
+        </div>
+        <div className="button-row">
+          <button
+            className={mount?.TrackingEnabled && mount?.TrackingMode === 'Sidereal' ? 'tracking-button active' : 'tracking-button'}
+            type="button"
+            disabled={!mount?.Connected || mount?.AtPark || mount?.CanSetTrackingEnabled === false || commandBusy !== ''}
+            onClick={() => void runMountTracking(0)}
+          >
+            Sidereal Tracking
+          </button>
+          <button
+            className={!mount?.TrackingEnabled || mount?.TrackingMode === 'Stopped' ? 'tracking-stop-button active' : 'tracking-stop-button'}
+            type="button"
+            disabled={!mount?.Connected || mount?.AtPark || mount?.CanSetTrackingEnabled === false || commandBusy !== ''}
+            onClick={() => void runMountTracking(4)}
+          >
+            Stop Tracking
+          </button>
+        </div>
         <DataTable
           rows={[
             ['Mount', mount?.DisplayName || mount?.Name],
+            ['Connected', mount?.Connected],
+            ['Slewing', mount?.Slewing],
+            ['Parked', mount?.AtPark],
             ['RA', mount?.RightAscensionString],
             ['Dec', mount?.DeclinationString],
             ['Altitude', mount?.AltitudeString],
             ['Azimuth', mount?.AzimuthString],
             ['Tracking', mount?.TrackingEnabled],
             ['Tracking mode', mount?.TrackingMode],
+            ['Can set tracking', mount?.CanSetTrackingEnabled],
+            ['Supported modes', mount?.TrackingModes?.join(', ')],
             ['Pier side', mount?.SideOfPier],
             ['Flip window', mount?.TimeToMeridianFlipString],
             ['Guider pixel scale', guider?.PixelScale]
@@ -1889,7 +2340,7 @@ function TargetingTab({
       <Panel title="Stellarium Import" icon={<Search size={17} />}>
         <DataTable
           rows={[
-            ['Remote Control', 'localhost:8090'],
+            ['Remote Control', connectionClient.getSnapshot().stellariumOrigin],
             ['Selection', target?.name],
             ['Source', target?.source],
             ['Imported', target?.importedAt],
@@ -2264,6 +2715,10 @@ function PipelinePanel({ pipelineState }: { pipelineState: AcquisitionPipelineSt
           <span>Delivered</span>
           <strong>{pipelineState.health?.deliveredFrames ?? '-'}</strong>
         </div>
+        <div className={latest && transferStatusFor(latest) === 'already-present' ? 'pipeline-state warn' : undefined}>
+          <span>Latest</span>
+          <strong>{latest ? transferStatusLabel(latest) : '-'}</strong>
+        </div>
         <div>
           <span>Checked</span>
           <strong>{pipelineState.checkedAt}</strong>
@@ -2302,7 +2757,7 @@ function PipelinePanel({ pipelineState }: { pipelineState: AcquisitionPipelineSt
               <div className="frame-row pipeline-history-row" key={`${item.id}-${item.transferredAt}`}>
                 <span>{item.transferredAt}</span>
                 <strong title={item.destinationPath}>{item.fileName}</strong>
-                <em>{formatBytes(item.sizeBytes)}</em>
+                <em>{transferStatusLabel(item)} | {formatBytes(item.sizeBytes)}</em>
               </div>
             ))}
           </div>
@@ -2358,22 +2813,33 @@ function PipelinePanel({ pipelineState }: { pipelineState: AcquisitionPipelineSt
 }
 
 function AcquisitionTab({
+  operationGate,
+  externalBusy,
   equipment,
   activeItem,
   queue,
   sessionRoot,
   acquisitionEvents,
   demoMode,
+  appSettings,
+  onNavigate,
+  onRefreshEquipment,
   onSetActiveQueueItem
 }: {
+  operationGate: OperationGate;
+  externalBusy: boolean;
   equipment: EquipmentInfo | null;
   activeItem: QueueItem | null;
   queue: QueueItem[];
   sessionRoot: string | null;
   acquisitionEvents: AcquisitionEvent[];
   demoMode: boolean;
+  appSettings: AppSettings;
+  onNavigate: (tab: TabKey) => void;
+  onRefreshEquipment: () => Promise<void>;
   onSetActiveQueueItem: (id: string) => void;
 }) {
+  const operationKind = useSyncExternalStore(operationGate.subscribe, operationGate.getSnapshot);
   const camera = equipment?.Camera;
   const plan = activeItem?.plan;
   const totalIntegration = plan ? integrationSeconds(plan) : 0;
@@ -2398,16 +2864,17 @@ function AcquisitionTab({
   const [phdStatus, setPhdStatus] = useState<Phd2Status | null>(null);
   const [phdMessage, setPhdMessage] = useState('');
   const [sequenceRun, setSequenceRun] = useState<SequenceRunState>(defaultSequenceRun);
+  const [targetPrep, setTargetPrep] = useState<TargetPrepState>(defaultTargetPrep);
   const [pipelineState, setPipelineState] = useState<AcquisitionPipelineState>({
     health: null,
     pending: [],
     failed: [],
     history: [],
-    autoTransfer: loadAutoTransferEnabled(),
+    autoTransfer: appSettings.autoTransferEnabled,
     message: 'Not checked',
     checkedAt: '-'
   });
-  const sequenceAbortRef = useRef(false);
+  const targetPrepTraceIdRef = useRef(0);
   const previewRenderIdRef = useRef(0);
   const plannedFrames = useMemo(() => {
     if (!activeItem || !plan) {
@@ -2417,12 +2884,126 @@ function AcquisitionTab({
     return storageClient.plannedFramePaths(activeItem.target, plan, 18, sessionRoot);
   }, [activeItem, plan, sessionRoot]);
   const hiddenPlannedFrameCount = plan ? Math.max(0, plan.frameCount - plannedFrames.length) : 0;
+  const readinessItems: ReadinessItem[] = useMemo(() => {
+    const hasPlan = Boolean(activeItem && plan);
+    const frameCountOk = Boolean(plan && Number.isFinite(plan.frameCount) && plan.frameCount >= 1 && plan.frameCount <= 500);
+    const exposureOk = Boolean(plan && Number.isFinite(plan.exposureSeconds) && plan.exposureSeconds > 0 && plan.exposureSeconds <= 2000);
+    const mountConnected = Boolean(equipment?.Mount?.Connected);
+    const mountTracking = Boolean(equipment?.Mount?.TrackingEnabled);
+    const trackingRequired = Boolean(plan && plan.imageType.toLowerCase() === 'light');
+    const guidingRequired = Boolean(plan?.guidingRequired);
+    const phdGuiding = Boolean(phdStatus?.connected && phdStatus.appState.toLowerCase().includes('guid'));
+    const agentReachable = pipelineState.message === 'Agent reachable' || pipelineState.health?.status === 'ok';
+
+    return [
+      {
+        key: 'plan',
+        label: 'Plan',
+        detail: hasPlan
+          ? `${activeItem?.target.name} ${plan?.frameCount} x ${plan?.exposureSeconds}s`
+          : 'No active target',
+        targetTab: 'targeting',
+        status: hasPlan && frameCountOk && exposureOk ? 'ok' : 'block',
+        blocking: true
+      },
+      {
+        key: 'camera',
+        label: 'Camera',
+        detail: camera?.Connected ? camera.DisplayName || camera.Name || 'Connected' : 'Disconnected',
+        targetTab: 'setup',
+        status: camera?.Connected ? 'ok' : 'block',
+        blocking: true
+      },
+      {
+        key: 'storage',
+        label: 'Storage',
+        detail: sessionRoot || 'No destination',
+        targetTab: 'settings',
+        status: sessionRoot ? 'ok' : 'block',
+        blocking: true
+      },
+      {
+        key: 'mount',
+        label: 'Mount',
+        detail: trackingRequired
+          ? mountConnected
+            ? mountTracking ? 'Tracking' : 'Tracking off'
+            : 'Disconnected'
+          : mountConnected
+            ? mountTracking ? 'Tracking' : 'Tracking off'
+            : 'Not required',
+        targetTab: 'setup',
+        status: trackingRequired
+          ? mountConnected && mountTracking ? 'ok' : 'block'
+          : mountConnected && !mountTracking ? 'warn' : 'ok',
+        blocking: trackingRequired
+      },
+      {
+        key: 'guiding',
+        label: 'Guiding',
+        detail: guidingRequired
+          ? phdStatus?.connected ? phdStatus.appState || 'Connected' : phdMessage || 'Unavailable'
+          : 'Not required',
+        targetTab: 'setup',
+        status: !guidingRequired || phdGuiding ? 'ok' : 'warn'
+      },
+      {
+        key: 'agent',
+        label: 'Agent',
+        detail: agentReachable ? 'Reachable' : pipelineState.message,
+        targetTab: 'settings',
+        status: agentReachable ? 'ok' : 'warn'
+      },
+      {
+        key: 'transfer',
+        label: 'Transfer',
+        detail: appSettings.autoTransferEnabled ? 'Auto on' : 'Auto off',
+        targetTab: 'settings',
+        status: appSettings.autoTransferEnabled ? 'ok' : 'warn'
+      }
+    ];
+  }, [
+    activeItem,
+    appSettings.autoTransferEnabled,
+    camera,
+    equipment?.Mount,
+    phdMessage,
+    phdStatus,
+    pipelineState.health?.status,
+    pipelineState.message,
+    plan,
+    sessionRoot
+  ]);
+  const readinessBlocks = readinessItems.filter((item) => item.blocking && item.status === 'block');
+  const readinessWarnings = readinessItems.filter((item) => item.status === 'warn');
+  const readinessState: ReadinessStatus = readinessBlocks.length ? 'block' : readinessWarnings.length ? 'warn' : 'ok';
+  const readinessMessage = readinessBlocks[0]?.detail
+    || readinessWarnings[0]?.detail
+    || 'Ready';
 
   const togglePanel = useCallback((key: AcquisitionPanelKey) => {
     setCollapsedPanels((current) => ({ ...current, [key]: !current[key] }));
   }, []);
 
-  const renderFitsPath = useCallback(async (path: string, name?: string, sizeBytes = 0) => {
+  const createTargetPrepTrace = useCallback((step: string, detail: string, status: 'pending' | 'ok' | 'warn' | 'error' = 'ok') => ({
+      id: ++targetPrepTraceIdRef.current,
+      at: new Date().toLocaleTimeString(),
+      step,
+      detail,
+      status
+    }), []);
+
+  const appendTargetPrepTrace = useCallback((step: string, detail: string, status: 'pending' | 'ok' | 'warn' | 'error' = 'ok') => {
+    const entry = createTargetPrepTrace(step, detail, status);
+
+    setTargetPrep((current) => ({
+      ...current,
+      trace: [entry, ...current.trace].slice(0, 12),
+      updatedAt: entry.at
+    }));
+  }, [createTargetPrepTrace]);
+
+  const renderFitsPath = useCallback(async (path: string, name?: string, sizeBytes = 0, selectedFile = false) => {
     const renderId = previewRenderIdRef.current + 1;
     previewRenderIdRef.current = renderId;
     setPreviewRendering(true);
@@ -2433,7 +3014,7 @@ function AcquisitionTab({
         window.setTimeout(() => resolve(null), 45000);
       });
       const preview = await Promise.race([
-        storageClient.renderFitsPreview(path, renderStretch, fitsAutoStretch),
+        storageClient.renderFitsPreview(path, renderStretch, fitsAutoStretch, previewRenderMaxSize(appSettings.previewRenderSize), selectedFile),
         timeout
       ]);
 
@@ -2457,13 +3038,17 @@ function AcquisitionTab({
 
       setPreviewImage({
         name: name || path.split(/[\\/]/).pop() || 'preview.fits',
-        sizeBytes,
+        sizeBytes: preview.size_bytes || sizeBytes,
         type: 'image/fits',
         dataUrl: preview.data_url,
         width: preview.width,
         height: preview.height,
         sourcePath: preview.source_path,
-        sourceKind: 'fits'
+        sourceKind: 'fits',
+        fitsHeader: preview.header,
+        analysis: preview.analysis ?? undefined,
+        fitsBlack: preview.black_point,
+        fitsWhite: preview.white_point
       });
       setCaptureMessage('FITS preview rendered.');
     } catch (caught) {
@@ -2475,7 +3060,7 @@ function AcquisitionTab({
         setPreviewRendering(false);
       }
     }
-  }, [fitsAutoStretch, renderStretch]);
+  }, [appSettings.previewRenderSize, fitsAutoStretch, renderStretch]);
 
   const cancelPreviewRender = () => {
     previewRenderIdRef.current += 1;
@@ -2536,14 +3121,12 @@ function AcquisitionTab({
     let cancelled = false;
 
     const refreshPipelineState = async () => {
-      const storedAgent = settingsClient.loadJson(frameAgentStorageKey, { base: frameTransferClient.defaultAgentBase });
-      const agentBase = typeof storedAgent.base === 'string' ? storedAgent.base : frameTransferClient.defaultAgentBase;
       const storedHistory = settingsClient.loadJson(transferHistoryStorageKey, { items: [] as TransferHistoryItem[] });
       const history = Array.isArray(storedHistory.items) ? storedHistory.items.slice(0, 5) : [];
-      const autoTransfer = loadAutoTransferEnabled();
+      const autoTransfer = appSettings.autoTransferEnabled;
 
       try {
-        frameTransferClient.setAgentBase(agentBase);
+        frameTransferClient.setAgentBase(appSettings.agentBase);
         const [health, pending, failed] = await Promise.all([
           frameTransferClient.getHealth(),
           frameTransferClient.getPendingFrames(),
@@ -2585,7 +3168,7 @@ function AcquisitionTab({
       cancelled = true;
       window.clearInterval(intervalId);
     };
-  }, [demoMode]);
+  }, [appSettings.agentBase, appSettings.autoTransferEnabled, demoMode]);
 
   useEffect(() => {
     if (fitsAutoStretch) {
@@ -2609,6 +3192,10 @@ function AcquisitionTab({
       return undefined;
     }
 
+    if (!appSettings.autoLoadLatestFrame || !appSettings.autoRenderFitsOnArrival) {
+      return undefined;
+    }
+
     if (!latestFrame?.destinationPath || !latestFrame.fileName.toLowerCase().match(/\.fits?$/)) {
       return undefined;
     }
@@ -2629,7 +3216,9 @@ function AcquisitionTab({
   }, [
     pipelineState.history[0]?.destinationPath,
     pipelineState.history[0]?.fileName,
-    pipelineState.history[0]?.sizeBytes
+    pipelineState.history[0]?.sizeBytes,
+    appSettings.autoLoadLatestFrame,
+    appSettings.autoRenderFitsOnArrival
   ]);
 
   useEffect(() => {
@@ -2717,13 +3306,18 @@ function AcquisitionTab({
   };
 
   const chooseFitsPreview = async () => {
+    if (!tauriClient.isDesktopRuntime()) {
+      setCaptureMessage('Open FITS is available in the desktop app.');
+      return;
+    }
+
+    setCaptureMessage('Opening FITS file picker...');
+
     try {
       const selectedPath = await storageClient.choosePreviewFile();
 
       if (!selectedPath) {
-        if (!tauriClient.isDesktopRuntime()) {
-          setCaptureMessage('Open FITS is available in the desktop app. Drop PNG/JPG/WebP files here in browser mode.');
-        }
+        setCaptureMessage('FITS open canceled.');
         return;
       }
 
@@ -2732,7 +3326,7 @@ function AcquisitionTab({
         return;
       }
 
-      await renderFitsPath(selectedPath);
+      await renderFitsPath(selectedPath, undefined, 0, true);
     } catch (caught) {
       setCaptureMessage(caught instanceof Error ? caught.message : 'Unable to open FITS preview.');
     }
@@ -2791,25 +3385,51 @@ function AcquisitionTab({
     setPreviewZoom((current) => Math.max(0.25, Math.min(4, Number((current + delta).toFixed(2)))));
   };
 
-  const runTestExposure = async () => {
-    if (captureRunning) {
-      if (!window.confirm('Abort the active test exposure?')) {
-        return;
-      }
-
-      try {
+  const stopCameraOperation = async () => {
+    const operation = operationGate.current;
+    if (!operation || operation.kind === 'prepare' || !operationGate.requestStop(operation)) return;
+    let confirmed = false;
+    if (operation.kind === 'capture') {
+      setSequenceRun((current) => ({ ...current, phase: 'aborting', message: 'Stopping capture...' }));
+    } else {
+      setCaptureMessage('Stopping preview exposure...');
+    }
+    try {
+      if (!demoMode) {
         const { response, body } = await ninaClient.abortExposure();
-
         if (!response.ok || !body.Success) {
           throw new Error(body.Error || `Abort failed with HTTP ${response.status}.`);
         }
-
-        setCaptureMessage(body.Response || 'Exposure aborted.');
-      } catch (caught) {
-        setCaptureMessage(caught instanceof Error ? caught.message : 'Exposure abort failed.');
-      } finally {
+      }
+      await operation.settled;
+      if (!demoMode) {
+        const { response, body } = await ninaClient.getJson<CameraInfo>('equipment/camera/info');
+        if (!response.ok || !body.Success || !body.Response?.Connected || body.Response.IsExposing !== false) {
+          throw new Error('Camera stop could not be verified. Check NINA, then retry abort.');
+        }
+      }
+      confirmed = true;
+      if (operation.kind === 'capture') {
+        setSequenceRun((current) => ({ ...current, running: false, phase: 'aborted', message: 'Capture run aborted.', completedAt: new Date().toLocaleTimeString() }));
+      } else {
+        setCaptureMessage('Preview exposure aborted.');
         setCaptureRunning(false);
       }
+    } catch (caught) {
+      const message = caught instanceof Error ? caught.message : 'Exposure abort failed. Retry abort.';
+      if (operation.kind === 'capture') {
+        setSequenceRun((current) => ({ ...current, running: true, phase: 'error', message }));
+      } else {
+        setCaptureMessage(message);
+      }
+    } finally {
+      operationGate.finishStop(operation, confirmed);
+    }
+  };
+
+  const runTestExposure = async () => {
+    if (operationGate.current?.kind === 'preview') {
+      if (window.confirm('Abort the active test exposure?')) await stopCameraOperation();
       return;
     }
 
@@ -2827,6 +3447,14 @@ function AcquisitionTab({
       return;
     }
 
+    if (demoMode) {
+      setCaptureMessage('Preview exposure requires a live camera. Local FITS previews remain available.');
+      return;
+    }
+
+    if (externalBusy || operationGate.current) return;
+    const operation = operationGate.begin('preview');
+    if (!operation) return;
     setCaptureRunning(true);
     setCaptureMessage('Capturing preview exposure...');
     setCaptureStats(null);
@@ -2843,6 +3471,8 @@ function AcquisitionTab({
         quality: -1
       }, timeoutMs);
 
+      if (operation.cancelled) return;
+
       if (!response.ok) {
         let detail = `Capture failed with HTTP ${response.status}.`;
         try {
@@ -2856,6 +3486,7 @@ function AcquisitionTab({
 
       const blob = await response.blob();
       const dataUrl = await blobToDataUrl(blob);
+      if (operation.cancelled) return;
       const capturedAt = new Date().toLocaleTimeString().replace(/:/g, '-');
 
       setPreviewImage({
@@ -2874,7 +3505,10 @@ function AcquisitionTab({
             await new Promise((resolve) => window.setTimeout(resolve, 1200));
           }
 
+          if (operation.cancelled) return;
+
           const { response: statsResponse, body: statsJson } = await ninaClient.getCaptureStatistics<CaptureStats>();
+          if (operation.cancelled) return;
 
           if (statsResponse.ok && statsJson.Success && statsJson.Response && typeof statsJson.Response === 'object') {
             setCaptureStats(statsJson.Response);
@@ -2887,31 +3521,265 @@ function AcquisitionTab({
         }
       }
     } catch (caught) {
-      setCaptureMessage(caught instanceof Error ? caught.message : 'Preview exposure failed.');
+      if (!operation.cancelled) {
+        operationGate.requireStop(operation);
+        setCaptureMessage(`${caught instanceof Error ? caught.message : 'Preview exposure failed.'} Use Abort Exposure to verify the camera has stopped.`);
+      }
     } finally {
-      setCaptureRunning(false);
+      operationGate.finishWork(operation);
+      if (!operation.cancelled) setCaptureRunning(false);
+    }
+  };
+
+  const stopTargetPrep = async () => {
+    const operation = operationGate.current;
+    if (!operation || operation.kind !== 'prepare' || !operationGate.requestStop(operation)) return;
+    let confirmed = false;
+    appendTargetPrepTrace('Stop', 'Stop slew requested.', 'warn');
+    setTargetPrep((current) => ({
+      ...current,
+      running: true,
+      status: 'stopping',
+      message: 'Stopping target preparation...',
+      preparedTargetId: '',
+      updatedAt: new Date().toLocaleTimeString()
+    }));
+
+    try {
+      if (!demoMode) {
+        const { response, body } = await ninaClient.stopMountSlew();
+        if (!response.ok || !body.Success) {
+          throw new Error(body.Error || body.Response || `Stop slew failed with HTTP ${response.status}.`);
+        }
+      }
+      await operation.settled;
+      if (!demoMode) {
+        const { response, body } = await ninaClient.getJson<MountInfo>('equipment/mount/info');
+        if (!response.ok || !body.Success || !body.Response?.Connected || body.Response.Slewing !== false) {
+          throw new Error('Mount stop could not be verified. Check NINA, then retry Stop Prepare.');
+        }
+      }
+      confirmed = true;
+      appendTargetPrepTrace('Stop', 'Target preparation stopped.', 'warn');
+      setTargetPrep((current) => ({
+        ...current,
+        running: false,
+        status: 'stopped',
+        message: 'Target preparation stopped.',
+        preparedTargetId: '',
+        updatedAt: new Date().toLocaleTimeString()
+      }));
+    } catch (caught) {
+      appendTargetPrepTrace('Stop', caught instanceof Error ? caught.message : 'Unable to stop target preparation.', 'error');
+      setTargetPrep((current) => ({
+        ...current,
+        running: true,
+        status: 'error',
+        message: caught instanceof Error ? caught.message : 'Unable to stop target preparation.',
+        preparedTargetId: '',
+        updatedAt: new Date().toLocaleTimeString()
+      }));
+    } finally {
+      operationGate.finishStop(operation, confirmed);
+      await onRefreshEquipment();
+    }
+  };
+
+  const prepareActiveTarget = async () => {
+    if (operationGate.current?.kind === 'prepare') {
+      await stopTargetPrep();
+      return;
+    }
+
+    if (externalBusy || operationGate.current) return;
+
+    if (!activeItem) {
+      const trace = createTargetPrepTrace('Validate', 'No active target selected.', 'error');
+      setTargetPrep({
+        ...defaultTargetPrep,
+        status: 'error',
+        message: 'Select an active target first.',
+        updatedAt: trace.at,
+        trace: [trace]
+      });
+      return;
+    }
+
+    const { target } = activeItem;
+
+    if (!Number.isFinite(target.raDegrees) || !Number.isFinite(target.decDegrees)) {
+      const trace = createTargetPrepTrace('Validate', 'Target is missing RA/Dec coordinates.', 'error');
+      setTargetPrep({
+        ...defaultTargetPrep,
+        status: 'error',
+        message: 'Target is missing RA/Dec coordinates.',
+        updatedAt: trace.at,
+        trace: [trace]
+      });
+      return;
+    }
+
+    if (!equipment?.Mount?.Connected) {
+      const trace = createTargetPrepTrace('Validate', 'Mount is not connected.', 'error');
+      setTargetPrep({
+        ...defaultTargetPrep,
+        status: 'error',
+        message: 'Mount is not connected.',
+        updatedAt: trace.at,
+        trace: [trace]
+      });
+      return;
+    }
+
+    if (!demoMode && !window.confirm(`Prepare mount for ${target.name}? This may unpark, enable tracking, and slew/center the telescope.`)) {
+      return;
+    }
+
+    const operation = operationGate.begin('prepare');
+    if (!operation) return;
+
+    const targetKey = `${activeItem.id}:${target.raDegrees}:${target.decDegrees}`;
+    targetPrepTraceIdRef.current = 0;
+    const startTrace = createTargetPrepTrace('Start', `Preparing ${target.name}.`, 'pending');
+    setTargetPrep({
+      running: true,
+      status: 'unparking',
+      message: equipment.Mount.AtPark ? 'Unparking mount...' : 'Mount is unparked.',
+      preparedTargetId: '',
+      updatedAt: startTrace.at,
+      trace: [startTrace]
+    });
+
+    try {
+      if (demoMode) {
+        await new Promise((resolve) => window.setTimeout(resolve, 500));
+        if (operation.cancelled) {
+          return;
+        }
+        appendTargetPrepTrace('Ready', `Demo target prepared: ${target.name}`, 'ok');
+        setTargetPrep((current) => ({
+          ...current,
+          running: false,
+          status: 'ready',
+          message: `Demo target prepared: ${target.name}`,
+          preparedTargetId: targetKey,
+          updatedAt: new Date().toLocaleTimeString()
+        }));
+        return;
+      }
+
+      if (equipment.Mount.AtPark) {
+        appendTargetPrepTrace('Unpark', 'Unpark requested.', 'pending');
+        const { response, body } = await ninaClient.unparkMount();
+
+        if (!response.ok || !body.Success) {
+          throw new Error(body.Error || body.Response || `Unpark failed with HTTP ${response.status}.`);
+        }
+
+        appendTargetPrepTrace('Unpark', body.Response || 'Unpark accepted.', 'ok');
+        await new Promise((resolve) => window.setTimeout(resolve, 1500));
+      } else {
+        appendTargetPrepTrace('Unpark', 'Skipped; mount is not parked.', 'ok');
+      }
+
+      if (operation.cancelled) return;
+
+      setTargetPrep((current) => ({
+        ...current,
+        status: 'tracking',
+        message: 'Enabling sidereal tracking...',
+        updatedAt: new Date().toLocaleTimeString()
+      }));
+
+      appendTargetPrepTrace('Tracking', 'Sidereal tracking requested.', 'pending');
+      const tracking = await ninaClient.setMountTracking(0);
+
+      if (operation.cancelled) {
+        return;
+      }
+
+      if (!tracking.response.ok || !tracking.body.Success) {
+        throw new Error(tracking.body.Error || tracking.body.Response || `Tracking command failed with HTTP ${tracking.response.status}.`);
+      }
+
+      appendTargetPrepTrace('Tracking', tracking.body.Response || 'Sidereal tracking accepted.', 'ok');
+      setTargetPrep((current) => ({
+        ...current,
+        status: 'slewing',
+        message: `Slewing and centering ${target.name}...`,
+        updatedAt: new Date().toLocaleTimeString()
+      }));
+
+      appendTargetPrepTrace('Slew/Center', `Requested ${target.name}.`, 'pending');
+      const slew = await ninaClient.slewMount({
+        raDegrees: target.raDegrees as number,
+        decDegrees: target.decDegrees as number,
+        waitForResult: true,
+        center: true
+      });
+
+      if (operation.cancelled) {
+        return;
+      }
+
+      if (!slew.response.ok || !slew.body.Success) {
+        throw new Error(slew.body.Error || slew.body.Response || `Slew failed with HTTP ${slew.response.status}.`);
+      }
+
+      appendTargetPrepTrace('Slew/Center', slew.body.Response || 'Slew/center complete.', 'ok');
+      appendTargetPrepTrace('Ready', `${target.name} prepared.`, 'ok');
+      setTargetPrep((current) => ({
+        ...current,
+        running: false,
+        status: 'ready',
+        message: `${target.name} prepared. ${slew.body.Response}`,
+        preparedTargetId: targetKey,
+        updatedAt: new Date().toLocaleTimeString()
+      }));
+    } catch (caught) {
+      if (operation.cancelled) {
+        return;
+      }
+      operationGate.requireStop(operation);
+      appendTargetPrepTrace('Failed', caught instanceof Error ? caught.message : 'Target preparation failed.', 'error');
+      setTargetPrep((current) => ({
+        ...current,
+        running: true,
+        status: 'error',
+        message: `${caught instanceof Error ? caught.message : 'Target preparation failed.'} Use Stop Prepare to verify the mount has stopped.`,
+        preparedTargetId: '',
+        updatedAt: new Date().toLocaleTimeString()
+      }));
+    } finally {
+      operationGate.finishWork(operation);
+      await onRefreshEquipment();
     }
   };
 
   const runActivePlanCapture = async () => {
-    if (sequenceRun.running) {
+    if (operationGate.current?.kind === 'capture') {
       if (!window.confirm('Abort the active capture run?')) {
         return;
       }
 
-      sequenceAbortRef.current = true;
-      setSequenceRun((current) => ({ ...current, message: 'Aborting after current exposure...' }));
-
-      try {
-        await ninaClient.abortExposure();
-      } catch {
-        // NINA may already be idle. The loop still observes the abort flag.
-      }
+      await stopCameraOperation();
       return;
     }
 
     if (!activeItem || !plan) {
       setSequenceRun({ ...defaultSequenceRun, message: 'Select an active target first.' });
+      return;
+    }
+
+    if (externalBusy || operationGate.current) return;
+
+    if (targetPrep.running) {
+      setSequenceRun({ ...defaultSequenceRun, message: 'Target preparation is still running.' });
+      return;
+    }
+
+    if (readinessBlocks.length) {
+      setSequenceRun({ ...defaultSequenceRun, message: readinessBlocks[0].detail });
       return;
     }
 
@@ -2940,11 +3808,15 @@ function AcquisitionTab({
       return;
     }
 
-    sequenceAbortRef.current = false;
+    const operation = operationGate.begin('capture');
+    if (!operation) return;
     setSequenceRun({
       running: true,
       currentFrame: 0,
       totalFrames: plan.frameCount,
+      savedFrames: 0,
+      deliveredFramesAtStart: pipelineState.health?.deliveredFrames ?? 0,
+      phase: 'starting',
       message: 'Starting capture run...',
       startedAt: new Date().toLocaleTimeString(),
       completedAt: '-'
@@ -2952,52 +3824,94 @@ function AcquisitionTab({
 
     try {
       for (let frameNumber = 1; frameNumber <= plan.frameCount; frameNumber += 1) {
-        if (sequenceAbortRef.current) {
+        if (operation.cancelled) {
           break;
         }
 
         setSequenceRun((current) => ({
           ...current,
           currentFrame: frameNumber,
+          phase: 'exposing',
           message: `Capturing frame ${frameNumber} of ${plan.frameCount}...`
         }));
 
         const timeoutMs = Math.max(30000, Math.round(plan.exposureSeconds * 1000) + 120000);
-        const { response, body } = await ninaClient.captureSavedFrame({
-          duration: plan.exposureSeconds,
-          gain: plan.gain,
-          offset: plan.offset,
-          imageType: plan.imageType.toUpperCase(),
-          targetName: activeItem.target.name
-        }, timeoutMs);
-
-        if (!response.ok || !body.Success) {
-          throw new Error(body.Error || body.Response || `Capture failed with HTTP ${response.status}.`);
+        if (demoMode) {
+          await new Promise((resolve) => window.setTimeout(resolve, 500));
+        } else {
+          const { response, body } = await ninaClient.captureSavedFrame({
+            duration: plan.exposureSeconds,
+            gain: plan.gain,
+            offset: plan.offset,
+            imageType: plan.imageType.toUpperCase(),
+            targetName: activeItem.target.name
+          }, timeoutMs);
+          if (!response.ok || !body.Success) {
+            throw new Error(body.Error || body.Response || `Capture failed with HTTP ${response.status}.`);
+          }
         }
+
+        setSequenceRun((current) => ({
+          ...current,
+          savedFrames: Math.max(current.savedFrames, frameNumber),
+          phase: operation.cancelled ? current.phase : 'saving',
+          message: operation.cancelled ? current.message : `${demoMode ? 'Demo frame' : 'Frame'} ${frameNumber} saved${demoMode ? ' (simulated)' : ' on Starrunner'}.`
+        }));
+
+        if (operation.cancelled) return;
+        await new Promise((resolve) => window.setTimeout(resolve, 250));
+        if (operation.cancelled) return;
+
+        setSequenceRun((current) => ({
+          ...current,
+          phase: 'waiting-transfer',
+          message: demoMode ? `Demo frame ${frameNumber} simulated.` : `Frame ${frameNumber} saved on Starrunner. Transfer runs in the background.`
+        }));
       }
 
+      if (operation.cancelled) return;
       setSequenceRun((current) => ({
         ...current,
         running: false,
-        message: sequenceAbortRef.current ? 'Capture run aborted.' : 'Capture run complete.',
+        phase: 'complete',
+        message: demoMode ? 'Demo capture run complete. No files saved.' : 'Capture run complete.',
         completedAt: new Date().toLocaleTimeString()
       }));
     } catch (caught) {
+      if (operation.cancelled) return;
+      operationGate.requireStop(operation);
       setSequenceRun((current) => ({
         ...current,
-        running: false,
-        message: caught instanceof Error ? caught.message : 'Capture run failed.',
+        running: true,
+        phase: 'error',
+        message: `${caught instanceof Error ? caught.message : 'Capture run failed.'} Use Abort Run to verify the camera has stopped.`,
         completedAt: new Date().toLocaleTimeString()
       }));
     } finally {
-      sequenceAbortRef.current = false;
+      operationGate.finishWork(operation);
     }
   };
 
   const runProgress = sequenceRun.totalFrames ? `${sequenceRun.currentFrame} / ${sequenceRun.totalFrames}` : '-';
+  const deliveredDuringRun = Math.max(0, (pipelineState.health?.deliveredFrames ?? sequenceRun.deliveredFramesAtStart) - sequenceRun.deliveredFramesAtStart);
+  const runTransferCount = Math.min(sequenceRun.savedFrames, deliveredDuringRun);
   const activeSummary = activeItem && plan
     ? `${activeItem.target.name} | ${plan.imageType} | ${plan.frameCount} x ${plan.exposureSeconds}s`
     : 'No active target';
+  const activeTargetPrepKey = activeItem
+    ? `${activeItem.id}:${activeItem.target.raDegrees}:${activeItem.target.decDegrees}`
+    : '';
+  const targetPrepared = Boolean(activeTargetPrepKey && targetPrep.status === 'ready' && targetPrep.preparedTargetId === activeTargetPrepKey);
+  const transferSeen = sequenceRun.savedFrames > 0
+    ? runTransferCount >= sequenceRun.savedFrames
+    : Boolean(pipelineState.history[0]?.destinationPath || previewImage?.sourcePath);
+  const runSteps = [
+    { key: 'ready', label: readinessBlocks.length ? 'Blocked' : readinessWarnings.length ? 'Check' : 'Ready', active: !sequenceRun.running && sequenceRun.phase === 'idle', done: sequenceRun.running || sequenceRun.phase !== 'idle', state: readinessBlocks.length ? 'block' : readinessWarnings.length ? 'warn' : 'ok' },
+    { key: 'exposing', label: sequenceRun.phase === 'aborting' ? 'Aborting' : 'Exposing', active: sequenceRun.phase === 'starting' || sequenceRun.phase === 'exposing' || sequenceRun.phase === 'aborting', done: sequenceRun.savedFrames > 0 && !sequenceRun.running, state: sequenceRun.phase === 'aborting' ? 'warn' : 'ok' },
+    { key: 'saving', label: sequenceRun.savedFrames ? `Saved ${sequenceRun.savedFrames}` : 'Saved', active: sequenceRun.phase === 'saving', done: ['waiting-transfer', 'complete', 'aborted'].includes(sequenceRun.phase), state: 'ok' },
+    { key: 'transfer', label: sequenceRun.savedFrames ? `Transfer ${runTransferCount}/${sequenceRun.savedFrames}` : 'Transfer', active: sequenceRun.phase === 'waiting-transfer', done: transferSeen && sequenceRun.phase !== 'error', state: pipelineState.failed.length ? 'warn' : 'ok' },
+    { key: 'done', label: sequenceRun.phase === 'aborted' ? 'Aborted' : sequenceRun.phase === 'error' ? 'Error' : 'Done', active: ['complete', 'aborted', 'error'].includes(sequenceRun.phase), done: sequenceRun.phase === 'complete', state: sequenceRun.phase === 'error' ? 'block' : sequenceRun.phase === 'aborted' ? 'warn' : 'ok' }
+  ];
   const visibleAcquisitionEvents = demoMode ? demoAcquisitionEvents : acquisitionEvents;
   const previewZoomPercent = Math.round(previewZoom * 100);
   const previewDimensions = previewImage?.width && previewImage.height ? `${previewImage.width} x ${previewImage.height}` : '-';
@@ -3005,23 +3919,64 @@ function AcquisitionTab({
 
   return (
     <>
+      <section className={`readiness-strip ${readinessState}`} aria-label="Acquisition readiness">
+        <div className="readiness-summary">
+          <strong>{readinessState === 'ok' ? 'Ready' : readinessState === 'block' ? 'Blocked' : 'Check'}</strong>
+          <span>{readinessMessage}</span>
+        </div>
+        <div className="readiness-items">
+          {readinessItems.map((item) => (
+            <button
+              type="button"
+              className={`readiness-item ${item.status}`}
+              key={item.key}
+              title={`${item.detail}. Open ${item.targetTab}.`}
+              aria-label={`${item.label}: ${item.detail}. Open ${item.targetTab}.`}
+              onClick={() => onNavigate(item.targetTab)}
+            >
+              <span>{item.label}</span>
+              <strong>{item.status === 'ok' ? 'OK' : item.status === 'block' ? 'Missing' : 'Warn'}</strong>
+            </button>
+          ))}
+        </div>
+      </section>
+
       <section className="run-bar">
         <div className="run-main">
           <strong>{activeSummary}</strong>
           <span>{sequenceRun.message}</span>
         </div>
+        <div className="run-steps" aria-label="Acquisition run status">
+          {runSteps.map((step) => (
+            <div className={`run-step ${step.state}${step.active ? ' active' : ''}${step.done ? ' done' : ''}`} key={step.key}>
+              <span>{step.label}</span>
+            </div>
+          ))}
+        </div>
         <div className="run-metrics">
           <span>Frame {runProgress}</span>
+          <span>Saved {sequenceRun.savedFrames}</span>
+          <span>Transferred {runTransferCount}</span>
           <span>{camera?.CameraState || 'Camera unknown'}</span>
           <span>{formatTemp(camera?.Temperature)}</span>
+          <span>{targetPrepared ? 'Target prepared' : targetPrep.status === 'idle' ? 'Target unprepared' : targetPrep.status}</span>
           <span>Pending {pipelineState.pending.length}</span>
           <span>Failed {pipelineState.failed.length}</span>
           <span>{pipelineState.autoTransfer ? 'Auto-transfer on' : 'Auto-transfer off'}</span>
         </div>
         <button
+          className={targetPrep.running ? 'capture-button active' : ''}
+          type="button"
+          disabled={targetPrep.status === 'stopping' || (operationKind !== 'prepare' && (externalBusy || Boolean(operationKind) || !activeItem || !equipment?.Mount?.Connected))}
+          onClick={() => void prepareActiveTarget()}
+        >
+          {targetPrep.running ? <CircleStop size={16} /> : <Crosshair size={16} />}
+          {targetPrep.status === 'stopping' ? 'Stopping Prepare...' : targetPrep.running ? 'Stop Prepare' : 'Prepare Target'}
+        </button>
+        <button
           className={sequenceRun.running ? 'capture-button active' : 'capture-button'}
           type="button"
-          disabled={!activeItem || !camera?.Connected}
+          disabled={sequenceRun.phase === 'aborting' || (operationKind !== 'capture' && (externalBusy || Boolean(operationKind) || Boolean(readinessBlocks.length)))}
           onClick={() => void runActivePlanCapture()}
         >
           {sequenceRun.running ? <CircleStop size={16} /> : <Play size={16} />}
@@ -3114,7 +4069,7 @@ function AcquisitionTab({
             <div className="preview-toolbar">
               <label className="file-button">
                 Load Preview Image
-                <input type="file" accept="image/png,image/jpeg,image/webp,image/bmp,.fits,.fit,.fts" onChange={handlePreviewFile} />
+                <input type="file" accept="image/png,image/jpeg,image/webp,image/bmp" onChange={handlePreviewFile} />
               </label>
               <button type="button" disabled={!tauriClient.isDesktopRuntime()} onClick={() => void chooseFitsPreview()}>
                 Open FITS
@@ -3135,6 +4090,7 @@ function AcquisitionTab({
               <span>Source</span>
               <strong>{previewSource}</strong>
             </div>
+            {previewImage?.analysis ? <FitsHistogram analysis={previewImage.analysis} black={previewImage.fitsBlack ?? 0} white={previewImage.fitsWhite ?? 65535} /> : null}
             <div className="stretch-inline">
               <label>
                 Black
@@ -3240,7 +4196,7 @@ function AcquisitionTab({
               <button
                 className={captureRunning ? 'capture-button active' : 'capture-button'}
                 type="button"
-                disabled={!camera?.Connected}
+                disabled={operationKind !== 'preview' && (externalBusy || Boolean(operationKind) || !camera?.Connected)}
                 onClick={() => void runTestExposure()}
               >
                 <Aperture size={16} />
@@ -3291,6 +4247,7 @@ function AcquisitionTab({
           <div className="monitor-tabs">
             {([
               ['stats', 'Frame Stats'],
+              ['header', 'FITS Header'],
               ['recent', `Recent ${visibleAcquisitionEvents.length}`],
               ['planned', `Planned ${plannedFrames.length}`],
               ['pipeline', 'Pipeline']
@@ -3307,19 +4264,21 @@ function AcquisitionTab({
           </div>
 
           {monitorTab === 'stats' ? (
+            <>
             <div className="details-grid">
               <DataTable
                 rows={[
                   ['Loaded file', previewImage?.name],
                   ['File type', previewImage?.type],
                   ['File size', previewImage ? formatBytes(previewImage.sizeBytes) : undefined],
-                  ['Image size', previewImage?.width && previewImage.height ? `${previewImage.width} x ${previewImage.height}` : undefined],
-                  ['Median ADU', captureStats?.Median ?? 'Not computed'],
-                  ['Mean ADU', captureStats?.Mean ?? 'Not computed'],
-                  ['Min / Max', captureStats ? `${formatValue(captureStats.Min)} / ${formatValue(captureStats.Max)}` : 'Not computed'],
-                  ['Star count', captureStats?.Stars ?? 'Not computed'],
-                  ['HFR', captureStats?.HFR ?? 'Not computed'],
-                  ['StDev', captureStats?.StDev ?? 'Not computed']
+                  ['Preview size', previewImage?.width && previewImage.height ? `${previewImage.width} x ${previewImage.height}` : undefined],
+                  ['Analysis source', previewImage?.analysis ? 'Loaded FITS, full-resolution raw samples' : 'No local FITS analysis'],
+                  ['Sensor image size', previewImage?.analysis ? `${previewImage.analysis.width} x ${previewImage.analysis.height}` : undefined],
+                  ['Median (FITS)', analysisNumber(previewImage?.analysis?.median)],
+                  ['Mean (FITS)', analysisNumber(previewImage?.analysis?.mean)],
+                  ['Min / Max (FITS)', `${analysisNumber(previewImage?.analysis?.min)} / ${analysisNumber(previewImage?.analysis?.max)}`],
+                  ['Std dev (population)', analysisNumber(previewImage?.analysis?.std_dev)],
+                  ['Valid / excluded samples', previewImage?.analysis ? `${previewImage.analysis.valid_samples.toLocaleString()} / ${previewImage.analysis.excluded_samples.toLocaleString()}` : undefined]
                 ]}
               />
               <DataTable
@@ -3334,6 +4293,8 @@ function AcquisitionTab({
                   ['Gain', plan?.gain],
                   ['Offset', plan?.offset],
                   ['Camera temp', plan ? `${plan.temperatureC} C` : undefined],
+                  ['Target prep', targetPrepared ? 'Ready' : targetPrep.message],
+                  ['Prep updated', targetPrep.updatedAt],
                   ['Autofocus', plan?.autofocusBeforeRun],
                   ['Guiding', plan?.guidingRequired],
                   ['Dither', plan?.dither],
@@ -3348,6 +4309,10 @@ function AcquisitionTab({
                   ['Exposing', camera?.IsExposing],
                   ['Temperature', formatTemp(camera?.Temperature)],
                   ['Cooler power', camera?.CoolerPower === undefined ? undefined : `${camera.CoolerPower.toFixed(1)}%`],
+                  ['Mount tracking', equipment?.Mount?.TrackingEnabled],
+                  ['Mount mode', equipment?.Mount?.TrackingMode],
+                  ['Mount parked', equipment?.Mount?.AtPark],
+                  ['Mount slewing', equipment?.Mount?.Slewing],
                   ['Run progress', sequenceRun.totalFrames ? `${sequenceRun.currentFrame} / ${sequenceRun.totalFrames}` : '-'],
                   ['Run status', sequenceRun.message],
                   ['Run started', sequenceRun.startedAt],
@@ -3361,6 +4326,47 @@ function AcquisitionTab({
                 ]}
               />
             </div>
+            <details className="nina-capture-stats">
+              <summary>NINA capture statistics (latest API result, not the loaded file)</summary>
+              <DataTable rows={[
+                ['Median ADU', captureStats?.Median ?? 'Not reported'],
+                ['Mean ADU', captureStats?.Mean ?? 'Not reported'],
+                ['Min / Max', captureStats ? `${formatValue(captureStats.Min)} / ${formatValue(captureStats.Max)}` : 'Not reported'],
+                ['Star count', captureStats?.Stars ?? 'Not reported'],
+                ['HFR', captureStats?.HFR ?? 'Not reported'],
+                ['StDev', captureStats?.StDev ?? 'Not reported']
+              ]} />
+            </details>
+            {targetPrep.trace.length ? (
+              <div className="prep-trace-list">
+                {targetPrep.trace.map((entry) => (
+                  <div className={`prep-trace-row ${entry.status}`} key={entry.id}>
+                    <time>{entry.at}</time>
+                    <strong>{entry.step}</strong>
+                    <span>{entry.detail}</span>
+                  </div>
+                ))}
+              </div>
+            ) : null}
+            </>
+          ) : null}
+
+          {monitorTab === 'header' ? (
+            previewImage?.sourceKind === 'fits' && previewImage.fitsHeader?.length ? (
+              <div className="fits-header-table">
+                {previewImage.fitsHeader.map((card) => (
+                  <div className="fits-header-row" key={card.key}>
+                    <strong>{card.key}</strong>
+                    <span>{card.value || '-'}</span>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <div className="empty-state">
+                <Aperture size={18} />
+                Load a FITS frame to inspect its header.
+              </div>
+            )
           ) : null}
 
           {monitorTab === 'recent' ? (
@@ -3411,39 +4417,29 @@ function AcquisitionTab({
   );
 }
 
-function LogsTab({
-  events,
-  error,
-  apiVersion,
-  ninaVersion,
+function FrameTransferPanel({
+  demoMode,
+  onTransferBusyChange,
+  appSettings,
   sessionRoot,
   storageBusy,
+  onUpdateAppSettings,
   onChooseSessionRoot,
   onClearSessionRoot
 }: {
-  events: NinaEvent[];
-  error: string;
-  apiVersion: string;
-  ninaVersion: string;
+  demoMode: boolean;
+  onTransferBusyChange: (busy: boolean) => void;
+  appSettings: AppSettings;
   sessionRoot: string | null;
   storageBusy: boolean;
+  onUpdateAppSettings: (updates: Partial<AppSettings>) => void;
   onChooseSessionRoot: () => Promise<void>;
   onClearSessionRoot: () => Promise<void>;
 }) {
-  const [diagnostics, setDiagnostics] = useState<DiagnosticResult[]>([]);
-  const [diagnosticsRunning, setDiagnosticsRunning] = useState(false);
-  const [diagnosticsRunAt, setDiagnosticsRunAt] = useState('');
-  const [capabilities, setCapabilities] = useState<CapabilityResult[]>([]);
-  const [capabilitiesRunning, setCapabilitiesRunning] = useState(false);
-  const [capabilitiesRunAt, setCapabilitiesRunAt] = useState('');
   const [agentHealth, setAgentHealth] = useState<AgentHealth | null>(null);
   const [pendingFrames, setPendingFrames] = useState<AgentFrame[]>([]);
   const [failedFrames, setFailedFrames] = useState<AgentFrame[]>([]);
-  const [agentBaseInput, setAgentBaseInput] = useState(() => {
-    const stored = settingsClient.loadJson(frameAgentStorageKey, { base: frameTransferClient.defaultAgentBase });
-    return typeof stored.base === 'string' ? stored.base : frameTransferClient.defaultAgentBase;
-  });
-  const [autoTransferEnabled, setAutoTransferEnabled] = useState(() => loadAutoTransferEnabled());
+  const [agentBaseInput, setAgentBaseInput] = useState(appSettings.agentBase);
   const [transferBusy, setTransferBusy] = useState(false);
   const [transferMessage, setTransferMessage] = useState('');
   const [transferRunAt, setTransferRunAt] = useState('');
@@ -3452,6 +4448,385 @@ function LogsTab({
     return Array.isArray(stored.items) ? stored.items.slice(0, 25) : [];
   });
   const transferInFlightRef = useRef(false);
+
+  useEffect(() => {
+    setAgentBaseInput(appSettings.agentBase);
+    frameTransferClient.setAgentBase(appSettings.agentBase);
+  }, [appSettings.agentBase]);
+
+  const saveAgentBase = () => {
+    if (transferInFlightRef.current) return;
+    const nextBase = agentBaseInput.trim() || frameTransferClient.defaultAgentBase;
+    setAgentBaseInput(nextBase);
+    frameTransferClient.setAgentBase(nextBase);
+    settingsClient.saveJson(frameAgentStorageKey, { base: nextBase });
+    onUpdateAppSettings({ agentBase: nextBase });
+    setAgentHealth(null);
+    setPendingFrames([]);
+    setTransferMessage(`Frame agent set to ${nextBase}.`);
+  };
+
+  const refreshFrameAgent = async () => {
+    if (demoMode) {
+      setTransferMessage('Frame transfer is paused in demo mode.');
+      return;
+    }
+    setTransferRunAt(new Date().toLocaleTimeString());
+    setTransferMessage('');
+
+    try {
+      const [health, frames, failed] = await Promise.all([
+        frameTransferClient.getHealth(),
+        frameTransferClient.getPendingFrames(),
+        frameTransferClient.getFailedFrames()
+      ]);
+
+      setAgentHealth(health);
+      setPendingFrames(frames);
+      setFailedFrames(failed);
+    } catch (caught) {
+      setTransferMessage(caught instanceof Error ? caught.message : 'Unable to reach Starrunner Agent.');
+    }
+  };
+
+  const addTransferHistoryItem = (item: TransferHistoryItem) => {
+    setTransferHistory((current) => {
+      const next = [item, ...current.filter((existing) => existing.id !== item.id)].slice(0, 25);
+      settingsClient.saveJson(transferHistoryStorageKey, { items: next });
+      return next;
+    });
+  };
+
+  const writeTransferredFrame = async (frame: AgentFrame) => {
+    const sessionFolder = storageClient.sessionFolder(
+      { name: frame.targetName },
+      { imageType: frame.imageType },
+      new Date(frame.createdAt)
+    );
+    const existing = await storageClient.findExistingFrame(sessionFolder, frame.fileName, frame.sha256, frame.sizeBytes);
+
+    if (existing?.found && existing.frame) {
+      await frameTransferClient.acknowledgeFrame(frame.id, frame.sha256);
+      addTransferHistoryItem({
+        id: frame.id,
+        transferredAt: new Date().toLocaleTimeString(),
+        targetName: existing.frame.target_name || frame.targetName,
+        imageType: existing.frame.image_type || frame.imageType,
+        sourceKind: frame.sourceKind || 'already-present',
+        transferStatus: 'already-present',
+        fileName: existing.frame.file_name || frame.fileName,
+        destinationPath: existing.frame.path,
+        sizeBytes: existing.frame.size_bytes || frame.sizeBytes,
+        sha256: existing.frame.sha256 || frame.sha256.toLowerCase()
+      });
+      return 'already-present';
+    }
+
+    const blob = await frameTransferClient.downloadFrame(frame.id);
+    const localSha = await sha256Hex(blob);
+
+    if (localSha !== frame.sha256.toLowerCase()) {
+      throw new Error('Downloaded frame checksum did not match the agent checksum.');
+    }
+
+    await storageClient.prepareSessionFolder(sessionFolder);
+    const result = await storageClient.writeFrame({
+      sessionFolder,
+      fileName: frame.fileName,
+      imageType: frame.imageType,
+      targetName: frame.targetName,
+      frameNumber: frame.frameNumber,
+      capturedAt: frame.createdAt,
+      dataBase64: await blobToBase64(blob),
+      expectedSha256: frame.sha256,
+      expectedSizeBytes: frame.sizeBytes
+    });
+
+    if (!result) {
+      throw new Error('Desktop storage command did not return a write result.');
+    }
+
+    if (result.frame.sha256 !== frame.sha256.toLowerCase() || result.frame.size_bytes !== frame.sizeBytes) {
+      throw new Error('Written frame checksum did not match the agent checksum.');
+    }
+
+    await frameTransferClient.acknowledgeFrame(frame.id, frame.sha256);
+    addTransferHistoryItem({
+      id: frame.id,
+      transferredAt: new Date().toLocaleTimeString(),
+      targetName: frame.targetName,
+      imageType: frame.imageType,
+      sourceKind: frame.sourceKind || 'frame',
+      transferStatus: 'transferred',
+      fileName: frame.fileName,
+      destinationPath: result.frame.path,
+      sizeBytes: result.frame.size_bytes,
+      sha256: result.frame.sha256
+    });
+
+    return 'transferred';
+  };
+
+  const transferFrames = async (framesToTransfer: AgentFrame[], mode: 'manual' | 'auto' = 'manual') => {
+    if (demoMode) return;
+    if (!framesToTransfer.length) {
+      setTransferMessage('No pending frames to transfer.');
+      return;
+    }
+
+    if (!tauriClient.isDesktopRuntime()) {
+      setTransferMessage('Frame transfer writes require the desktop app.');
+      return;
+    }
+
+    if (transferInFlightRef.current) {
+      return;
+    }
+
+    transferInFlightRef.current = true;
+    setTransferBusy(true);
+    onTransferBusyChange(true);
+
+    try {
+      const storageStatus = await storageClient.getStorageStatus();
+      if (!storageStatus?.session_root || !storageStatus.writable) {
+        throw new Error('Choose a writable image destination before transferring frames.');
+      }
+      let skippedExisting = 0;
+
+      for (const [index, frame] of framesToTransfer.entries()) {
+        setTransferMessage(`Transferring ${index + 1} of ${framesToTransfer.length}: ${frame.fileName}`);
+        const result = await writeTransferredFrame(frame);
+        if (result === 'already-present') {
+          skippedExisting += 1;
+        }
+      }
+
+      const transferredCount = framesToTransfer.length - skippedExisting;
+      const summary = [
+        transferredCount ? `${transferredCount} transferred` : '',
+        skippedExisting ? `${skippedExisting} already present` : ''
+      ].filter(Boolean).join(', ');
+      setTransferMessage(`${mode === 'auto' ? 'Auto transfer' : 'Transfer'} complete: ${summary}.`);
+      await refreshFrameAgent();
+    } catch (caught) {
+      setTransferMessage(caught instanceof Error ? caught.message : 'Frame transfer failed.');
+    } finally {
+      transferInFlightRef.current = false;
+      setTransferBusy(false);
+      onTransferBusyChange(false);
+    }
+  };
+
+  const transferOneFrame = async () => {
+    await transferFrames(pendingFrames.slice(0, 1));
+  };
+
+  const transferAllFrames = async () => {
+    await transferFrames(pendingFrames);
+  };
+
+  const retryFailedFrame = async (frame: AgentFrame) => {
+    if (demoMode) return;
+    setTransferBusy(true);
+    setTransferMessage(`Retrying ${frame.fileName}...`);
+
+    try {
+      await frameTransferClient.retryFrame(frame.id);
+      await refreshFrameAgent();
+      setTransferMessage(`Retried ${frame.fileName}.`);
+    } catch (caught) {
+      setTransferMessage(caught instanceof Error ? caught.message : 'Unable to retry failed frame.');
+    } finally {
+      setTransferBusy(false);
+    }
+  };
+
+  useEffect(() => {
+    if (demoMode || !appSettings.autoTransferEnabled || !tauriClient.isDesktopRuntime() || !sessionRoot) {
+      return undefined;
+    }
+
+    let cancelled = false;
+
+    const pollAndTransfer = async () => {
+      if (cancelled || transferInFlightRef.current) {
+        return;
+      }
+
+      try {
+        const [health, frames, failed] = await Promise.all([
+          frameTransferClient.getHealth(),
+          frameTransferClient.getPendingFrames(),
+          frameTransferClient.getFailedFrames()
+        ]);
+
+        if (cancelled) {
+          return;
+        }
+
+        setAgentHealth(health);
+        setPendingFrames(frames);
+        setFailedFrames(failed);
+        setTransferRunAt(new Date().toLocaleTimeString());
+
+        if (frames.length) {
+          await transferFrames(frames, 'auto');
+        }
+      } catch (caught) {
+        setTransferMessage(caught instanceof Error ? caught.message : 'Auto transfer could not reach Starrunner Agent.');
+      }
+    };
+
+    void pollAndTransfer();
+    const intervalId = window.setInterval(() => void pollAndTransfer(), 5000);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(intervalId);
+    };
+  }, [demoMode, appSettings.autoTransferEnabled, sessionRoot, appSettings.agentBase]);
+
+  return (
+    <Panel title="Frame Transfer" icon={<Save size={17} />} className="frame-transfer-panel">
+      <div className="agent-url-row">
+        <label>
+          <span>Agent URL</span>
+          <input
+            type="url"
+            disabled={transferBusy}
+            value={agentBaseInput}
+            onChange={(event) => setAgentBaseInput(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === 'Enter') {
+                saveAgentBase();
+              }
+            }}
+          />
+        </label>
+        <button type="button" onClick={saveAgentBase} disabled={transferBusy}>
+          <Save size={16} />
+          Save URL
+        </button>
+      </div>
+      <DataTable
+        rows={[
+          ['Agent', frameTransferClient.getAgentBase()],
+          ['Status', agentHealth?.status || transferMessage || 'Not checked'],
+          ['NINA output', agentHealth?.ninaOutputRoot],
+          ['Image destination', sessionRoot || 'Not selected'],
+          ['Auto transfer', appSettings.autoTransferEnabled ? 'Enabled' : 'Disabled'],
+          ['Pending', agentHealth?.pendingFrames ?? pendingFrames.length],
+          ['Failed', failedFrames.length],
+          ['Delivered', agentHealth?.deliveredFrames],
+          ['Last check', transferRunAt || '-']
+        ]}
+      />
+      <div className="settings-list transfer-settings-row">
+        <label className="settings-check">
+          <input
+            checked={appSettings.autoTransferEnabled}
+            type="checkbox"
+            onChange={(event) => onUpdateAppSettings({ autoTransferEnabled: event.target.checked })}
+          />
+          <span>
+            <strong>Auto-transfer new frames</strong>
+            <em>Poll Starrunner Agent and pull completed FITS files to this machine.</em>
+          </span>
+        </label>
+      </div>
+      <div className="button-row">
+        <button type="button" onClick={() => void refreshFrameAgent()} disabled={transferBusy}>
+          <RefreshCw size={16} />
+          Check Agent
+        </button>
+        <button type="button" disabled={storageBusy || transferBusy || !tauriClient.isDesktopRuntime()} onClick={() => void onChooseSessionRoot()}>
+          <Save size={16} />
+          Choose Folder
+        </button>
+        <button type="button" disabled={storageBusy || transferBusy || !sessionRoot} onClick={() => void onClearSessionRoot()}>
+          Clear Folder
+        </button>
+        <button type="button" onClick={() => void transferOneFrame()} disabled={transferBusy || !pendingFrames.length}>
+          <Save size={16} />
+          {transferBusy ? 'Transferring' : 'Transfer One'}
+        </button>
+        <button type="button" onClick={() => void transferAllFrames()} disabled={transferBusy || !pendingFrames.length}>
+          <Save size={16} />
+          Transfer All
+        </button>
+        {transferMessage ? <div className="inline-note">{transferMessage}</div> : null}
+      </div>
+      {pendingFrames.length ? (
+        <div className="frame-list">
+          {pendingFrames.slice(0, 8).map((frame) => (
+            <div className="frame-row" key={frame.id}>
+              <span>{frame.frameNumber}</span>
+              <strong>{frame.fileName}</strong>
+              <em>{formatBytes(frame.sizeBytes)} | {frame.sourceKind || 'frame'} | {frame.status}</em>
+            </div>
+          ))}
+          {pendingFrames.length > 8 ? <div className="frame-more">+{pendingFrames.length - 8} more pending</div> : null}
+        </div>
+      ) : null}
+      {failedFrames.length ? (
+        <div className="frame-list failed-frame-list">
+          {failedFrames.slice(0, 8).map((frame) => (
+            <div className="frame-row failed-frame-row" key={frame.id}>
+              <span>{frame.frameNumber}</span>
+              <strong title={frame.error || 'Transfer failed'}>{frame.fileName}</strong>
+              <em>{frame.error || 'failed'}</em>
+              <button type="button" disabled={transferBusy} onClick={() => void retryFailedFrame(frame)}>
+                Retry
+              </button>
+            </div>
+          ))}
+          {failedFrames.length > 8 ? <div className="frame-more">+{failedFrames.length - 8} more failed</div> : null}
+        </div>
+      ) : null}
+      {transferHistory.length ? (
+        <div className="frame-list transfer-history-list">
+          {transferHistory.map((item) => (
+            <div className="frame-row transfer-history-row" key={`${item.id}-${item.transferredAt}`}>
+              <span>{item.transferredAt}</span>
+              <strong title={item.destinationPath}>{item.fileName}</strong>
+              <em>{transferStatusLabel(item)} | {item.targetName} | {item.imageType} | {formatBytes(item.sizeBytes)}</em>
+            </div>
+          ))}
+        </div>
+      ) : (
+        <div className="empty-state">
+          <Save size={18} />
+          No transfer history yet.
+        </div>
+      )}
+    </Panel>
+  );
+}
+
+function DiagnosticsTab({
+  events,
+  acquisitionEvents,
+  tppaWorkflow,
+  error,
+  apiVersion,
+  ninaVersion
+}: {
+  events: NinaEvent[];
+  acquisitionEvents: AcquisitionEvent[];
+  tppaWorkflow: TppaWorkflowState;
+  error: string;
+  apiVersion: string;
+  ninaVersion: string;
+}) {
+  const [initialDiagnosticsState] = useState(loadDiagnosticsSessionState);
+  const [diagnostics, setDiagnostics] = useState<DiagnosticResult[]>(initialDiagnosticsState.diagnostics);
+  const [diagnosticsRunning, setDiagnosticsRunning] = useState(false);
+  const [diagnosticsRunAt, setDiagnosticsRunAt] = useState(initialDiagnosticsState.diagnosticsRunAt);
+  const [capabilities, setCapabilities] = useState<CapabilityResult[]>(initialDiagnosticsState.capabilities);
+  const [capabilitiesRunning, setCapabilitiesRunning] = useState(false);
+  const [capabilitiesRunAt, setCapabilitiesRunAt] = useState(initialDiagnosticsState.capabilitiesRunAt);
+  const [selectedEventId, setSelectedEventId] = useState<number | null>(null);
   const [runtimeStatus, setRuntimeStatus] = useState({
     shell: tauriClient.isDesktopRuntime() ? 'Tauri desktop' : 'Browser',
     settings: tauriClient.isDesktopRuntime() ? 'Checking' : 'Browser fallback',
@@ -3472,24 +4847,13 @@ function LogsTab({
   );
 
   useEffect(() => {
-    frameTransferClient.setAgentBase(agentBaseInput);
-  }, [agentBaseInput]);
-
-  const saveAgentBase = () => {
-    const nextBase = agentBaseInput.trim() || frameTransferClient.defaultAgentBase;
-    setAgentBaseInput(nextBase);
-    frameTransferClient.setAgentBase(nextBase);
-    settingsClient.saveJson(frameAgentStorageKey, { base: nextBase });
-    setAgentHealth(null);
-    setPendingFrames([]);
-    setTransferMessage(`Frame agent set to ${nextBase}.`);
-  };
-
-  const setAutoTransfer = (enabled: boolean) => {
-    setAutoTransferEnabled(enabled);
-    settingsClient.saveBoolean(autoTransferStorageKey, enabled);
-    setTransferMessage(enabled ? 'Auto transfer enabled.' : 'Auto transfer disabled.');
-  };
+    saveDiagnosticsSessionState({
+      diagnostics,
+      diagnosticsRunAt,
+      capabilities,
+      capabilitiesRunAt
+    });
+  }, [capabilities, capabilitiesRunAt, diagnostics, diagnosticsRunAt]);
 
   useEffect(() => {
     let active = true;
@@ -3583,199 +4947,58 @@ function LogsTab({
     setCapabilitiesRunning(false);
   };
 
-  const refreshFrameAgent = async () => {
-    setTransferRunAt(new Date().toLocaleTimeString());
-    setTransferMessage('');
-
-    try {
-      const [health, frames, failed] = await Promise.all([
-        frameTransferClient.getHealth(),
-        frameTransferClient.getPendingFrames(),
-        frameTransferClient.getFailedFrames()
-      ]);
-
-      setAgentHealth(health);
-      setPendingFrames(frames);
-      setFailedFrames(failed);
-    } catch (caught) {
-      setTransferMessage(caught instanceof Error ? caught.message : 'Unable to reach Starrunner Agent.');
-    }
-  };
-
-  const addTransferHistoryItem = (item: TransferHistoryItem) => {
-    setTransferHistory((current) => {
-      const next = [item, ...current.filter((existing) => existing.id !== item.id)].slice(0, 25);
-      settingsClient.saveJson(transferHistoryStorageKey, { items: next });
-      return next;
-    });
-  };
-
-  const writeTransferredFrame = async (frame: AgentFrame) => {
-    const blob = await frameTransferClient.downloadFrame(frame.id);
-    const localSha = await sha256Hex(blob);
-
-    if (localSha !== frame.sha256.toLowerCase()) {
-      throw new Error('Downloaded frame checksum did not match the agent checksum.');
-    }
-
-    const sessionFolder = storageClient.sessionFolder(
-      { name: frame.targetName },
-      { imageType: frame.imageType },
-      new Date(frame.createdAt)
-    );
-    await storageClient.prepareSessionFolder(sessionFolder);
-    const result = await storageClient.writeFrame({
-      sessionFolder,
-      fileName: frame.fileName,
-      imageType: frame.imageType,
-      targetName: frame.targetName,
-      frameNumber: frame.frameNumber,
-      capturedAt: frame.createdAt,
-      dataBase64: await blobToBase64(blob)
-    });
-
-    if (!result) {
-      throw new Error('Desktop storage command did not return a write result.');
-    }
-
-    if (result.frame.sha256 !== frame.sha256.toLowerCase()) {
-      throw new Error('Written frame checksum did not match the agent checksum.');
-    }
-
-    await frameTransferClient.acknowledgeFrame(frame.id, frame.sha256);
-    addTransferHistoryItem({
-      id: frame.id,
-      transferredAt: new Date().toLocaleTimeString(),
-      targetName: frame.targetName,
-      imageType: frame.imageType,
-      sourceKind: frame.sourceKind || 'frame',
-      fileName: frame.fileName,
-      destinationPath: result.frame.path,
-      sizeBytes: result.frame.size_bytes,
-      sha256: result.frame.sha256
-    });
-  };
-
-  const transferFrames = async (framesToTransfer: AgentFrame[], mode: 'manual' | 'auto' = 'manual') => {
-    if (!framesToTransfer.length) {
-      setTransferMessage('No pending frames to transfer.');
-      return;
-    }
-
-    if (!tauriClient.isDesktopRuntime()) {
-      setTransferMessage('Frame transfer writes require the desktop app.');
-      return;
-    }
-
-    const storageStatus = await storageClient.getStorageStatus();
-
-    if (!storageStatus?.session_root || !storageStatus.writable) {
-      setTransferMessage('Choose a writable image destination before transferring frames.');
-      return;
-    }
-
-    if (transferInFlightRef.current) {
-      return;
-    }
-
-    transferInFlightRef.current = true;
-    setTransferBusy(true);
-
-    try {
-      for (const [index, frame] of framesToTransfer.entries()) {
-        setTransferMessage(`Transferring ${index + 1} of ${framesToTransfer.length}: ${frame.fileName}`);
-        await writeTransferredFrame(frame);
-      }
-
-      setTransferMessage(`${mode === 'auto' ? 'Auto transferred' : 'Transferred'} ${framesToTransfer.length} frame${framesToTransfer.length === 1 ? '' : 's'}.`);
-      await refreshFrameAgent();
-    } catch (caught) {
-      setTransferMessage(caught instanceof Error ? caught.message : 'Frame transfer failed.');
-    } finally {
-      transferInFlightRef.current = false;
-      setTransferBusy(false);
-    }
-  };
-
-  const transferOneFrame = async () => {
-    await transferFrames(pendingFrames.slice(0, 1));
-  };
-
-  const transferAllFrames = async () => {
-    await transferFrames(pendingFrames);
-  };
-
-  const retryFailedFrame = async (frame: AgentFrame) => {
-    setTransferBusy(true);
-    setTransferMessage(`Retrying ${frame.fileName}...`);
-
-    try {
-      await frameTransferClient.retryFrame(frame.id);
-      await refreshFrameAgent();
-      setTransferMessage(`Retried ${frame.fileName}.`);
-    } catch (caught) {
-      setTransferMessage(caught instanceof Error ? caught.message : 'Unable to retry failed frame.');
-    } finally {
-      setTransferBusy(false);
-    }
-  };
-
-  useEffect(() => {
-    if (!autoTransferEnabled || !tauriClient.isDesktopRuntime() || !sessionRoot) {
-      return undefined;
-    }
-
-    let cancelled = false;
-
-    const pollAndTransfer = async () => {
-      if (cancelled || transferInFlightRef.current) {
-        return;
-      }
-
-      try {
-        const [health, frames, failed] = await Promise.all([
-          frameTransferClient.getHealth(),
-          frameTransferClient.getPendingFrames(),
-          frameTransferClient.getFailedFrames()
-        ]);
-
-        if (cancelled) {
-          return;
-        }
-
-        setAgentHealth(health);
-        setPendingFrames(frames);
-        setFailedFrames(failed);
-        setTransferRunAt(new Date().toLocaleTimeString());
-
-        if (frames.length) {
-          await transferFrames(frames, 'auto');
-        }
-      } catch (caught) {
-        setTransferMessage(caught instanceof Error ? caught.message : 'Auto transfer could not reach Starrunner Agent.');
-      }
-    };
-
-    void pollAndTransfer();
-    const intervalId = window.setInterval(() => void pollAndTransfer(), 5000);
-
-    return () => {
-      cancelled = true;
-      window.clearInterval(intervalId);
-    };
-  }, [autoTransferEnabled, sessionRoot, agentBaseInput]);
+  const diagnosticSummary = diagnostics.length
+    ? `${diagnostics.filter((item) => item.status === 'ok').length}/${diagnostics.length} ok`
+    : 'Not run';
+  const capabilitySummary = capabilities.length
+    ? `${capabilities.filter((item) => item.status === 'ok').length}/${capabilities.length} ok`
+    : 'Not run';
+  const selectedEvent = events.find((event) => event.id === selectedEventId) ?? events[0];
+  const latestAcquisitionEvent = acquisitionEvents[0];
+  const latestTppaEvent = tppaWorkflow.rawEvents[0];
+  const tppaRows: Array<[string, string]> = [
+    ['Step', tppaWorkflow.step],
+    ['Status', tppaWorkflow.status],
+    ['Instruction', tppaWorkflow.instruction || '-'],
+    ['Azimuth error', formatTppaError(tppaWorkflow.azimuthError)],
+    ['Altitude error', formatTppaError(tppaWorkflow.altitudeError)],
+    ['Total error', formatTppaError(tppaWorkflow.totalError)],
+    ['Socket', tppaWorkflow.socket],
+    ['Updated', tppaWorkflow.lastUpdated]
+  ];
 
   return (
-    <div className="tab-grid logs-grid">
-      <Panel title="Application Status" icon={<Wifi size={17} />}>
+    <div className="tab-grid diagnostics-grid">
+      <section className="diagnostics-summary" aria-label="Diagnostics summary">
+        <div>
+          <span>Runtime</span>
+          <strong>{runtimeStatus.shell}</strong>
+        </div>
+        <div>
+          <span>Diagnostics</span>
+          <strong>{diagnosticSummary}</strong>
+          <em>{diagnosticsRunAt || '-'}</em>
+        </div>
+        <div>
+          <span>Capabilities</span>
+          <strong>{capabilitySummary}</strong>
+          <em>{capabilitiesRunAt || '-'}</em>
+        </div>
+        <div>
+          <span>Events</span>
+          <strong>{events.length}</strong>
+        </div>
+      </section>
+
+      <Panel title="Application Status" icon={<Wifi size={17} />} className="diagnostics-status-panel">
         <DataTable
           rows={[
             ['NINA', ninaVersion],
             ['Advanced API', apiVersion],
             ['HTTP error', error || '-'],
-            ['HTTP base', apiBase],
-            ['WebSocket', wsUrl],
-            ['TPPA socket', tppaWsUrl],
+            ['HTTP base', ninaClient.urls.apiBase],
+            ['WebSocket', ninaClient.urls.wsUrl],
+            ['TPPA socket', ninaClient.urls.tppaWsUrl],
             ['Runtime', runtimeStatus.shell],
             ['Settings', runtimeStatus.settings],
             ['Storage', runtimeStatus.storage],
@@ -3818,116 +5041,6 @@ function LogsTab({
         )}
       </Panel>
 
-      <Panel title="Frame Transfer" icon={<Save size={17} />}>
-        <div className="agent-url-row">
-          <label>
-            <span>Agent URL</span>
-            <input
-              type="url"
-              value={agentBaseInput}
-              onChange={(event) => setAgentBaseInput(event.target.value)}
-              onKeyDown={(event) => {
-                if (event.key === 'Enter') {
-                  saveAgentBase();
-                }
-              }}
-            />
-          </label>
-          <button type="button" onClick={saveAgentBase}>
-            <Save size={16} />
-            Save URL
-          </button>
-        </div>
-        <DataTable
-          rows={[
-            ['Agent', frameTransferClient.getAgentBase()],
-            ['Status', agentHealth?.status || transferMessage || 'Not checked'],
-            ['NINA output', agentHealth?.ninaOutputRoot],
-            ['Image destination', sessionRoot || 'Not selected'],
-            ['Auto transfer', autoTransferEnabled ? 'Enabled' : 'Disabled'],
-            ['Pending', agentHealth?.pendingFrames ?? pendingFrames.length],
-            ['Failed', failedFrames.length],
-            ['Delivered', agentHealth?.deliveredFrames],
-            ['Last check', transferRunAt || '-']
-          ]}
-        />
-        <div className="check-row">
-          <label>
-            <input
-              checked={autoTransferEnabled}
-              type="checkbox"
-              onChange={(event) => setAutoTransfer(event.target.checked)}
-            />
-            Auto transfer new frames
-          </label>
-        </div>
-        <div className="button-row">
-          <button type="button" onClick={() => void refreshFrameAgent()} disabled={transferBusy}>
-            <RefreshCw size={16} />
-            Check Agent
-          </button>
-          <button type="button" disabled={storageBusy || transferBusy || !tauriClient.isDesktopRuntime()} onClick={() => void onChooseSessionRoot()}>
-            <Save size={16} />
-            Choose Folder
-          </button>
-          <button type="button" disabled={storageBusy || transferBusy || !sessionRoot} onClick={() => void onClearSessionRoot()}>
-            Clear Folder
-          </button>
-          <button type="button" onClick={() => void transferOneFrame()} disabled={transferBusy || !pendingFrames.length}>
-            <Save size={16} />
-            {transferBusy ? 'Transferring' : 'Transfer One'}
-          </button>
-          <button type="button" onClick={() => void transferAllFrames()} disabled={transferBusy || !pendingFrames.length}>
-            <Save size={16} />
-            Transfer All
-          </button>
-          {transferMessage ? <div className="inline-note">{transferMessage}</div> : null}
-        </div>
-        {pendingFrames.length ? (
-          <div className="frame-list">
-            {pendingFrames.slice(0, 8).map((frame) => (
-              <div className="frame-row" key={frame.id}>
-                <span>{frame.frameNumber}</span>
-                <strong>{frame.fileName}</strong>
-                <em>{formatBytes(frame.sizeBytes)} | {frame.sourceKind || 'frame'} | {frame.status}</em>
-              </div>
-            ))}
-            {pendingFrames.length > 8 ? <div className="frame-more">+{pendingFrames.length - 8} more pending</div> : null}
-          </div>
-        ) : null}
-        {failedFrames.length ? (
-          <div className="frame-list failed-frame-list">
-            {failedFrames.slice(0, 8).map((frame) => (
-              <div className="frame-row failed-frame-row" key={frame.id}>
-                <span>{frame.frameNumber}</span>
-                <strong title={frame.error || 'Transfer failed'}>{frame.fileName}</strong>
-                <em>{frame.error || 'failed'}</em>
-                <button type="button" disabled={transferBusy} onClick={() => void retryFailedFrame(frame)}>
-                  Retry
-                </button>
-              </div>
-            ))}
-            {failedFrames.length > 8 ? <div className="frame-more">+{failedFrames.length - 8} more failed</div> : null}
-          </div>
-        ) : null}
-        {transferHistory.length ? (
-          <div className="frame-list transfer-history-list">
-            {transferHistory.map((item) => (
-              <div className="frame-row transfer-history-row" key={`${item.id}-${item.transferredAt}`}>
-                <span>{item.transferredAt}</span>
-                <strong title={item.destinationPath}>{item.fileName}</strong>
-                <em>{item.targetName} | {item.imageType} | {formatBytes(item.sizeBytes)} | checksum ok</em>
-              </div>
-            ))}
-          </div>
-        ) : (
-          <div className="empty-state">
-            <Save size={18} />
-            No transfer history yet.
-          </div>
-        )}
-      </Panel>
-
       <Panel title="Capability Map" icon={<Telescope size={17} />}>
         {capabilities.length ? (
           <div className="capability-list">
@@ -3949,6 +5062,51 @@ function LogsTab({
             Discover read endpoints, command surfaces, and WebSocket channels.
           </div>
         )}
+      </Panel>
+
+      <Panel title="Event Inspector" icon={<ListTree size={17} />} className="event-inspector-panel">
+        <div className="event-inspector">
+          <div className="event-inspector-list">
+            {events.length ? (
+              events.slice(0, 12).map((event) => (
+                <button
+                  type="button"
+                  className={`event-inspector-row ${selectedEvent?.id === event.id ? 'active' : ''}`}
+                  key={event.id}
+                  onClick={() => setSelectedEventId(event.id)}
+                >
+                  <time>{event.receivedAt}</time>
+                  <span>{event.event}</span>
+                  <em>{event.detail || 'No detail'}</em>
+                </button>
+              ))
+            ) : (
+              <div className="empty-state">
+                <Wifi size={18} />
+                Waiting for NINA WebSocket events.
+              </div>
+            )}
+          </div>
+          <div className="event-inspector-detail">
+            <DataTable
+              rows={[
+                ['Event', selectedEvent?.event || '-'],
+                ['Received', selectedEvent?.receivedAt || '-'],
+                ['Detail', selectedEvent?.detail || '-'],
+                ['Latest acquisition', latestAcquisitionEvent ? `${latestAcquisitionEvent.event} | ${latestAcquisitionEvent.detail}` : '-'],
+                ['Latest TPPA', latestTppaEvent ? `${latestTppaEvent.event} | ${latestTppaEvent.detail}` : '-']
+              ]}
+            />
+            <pre className="raw-event-block">{selectedEvent?.rawText || selectedEvent?.detail || 'No raw event payload captured yet.'}</pre>
+          </div>
+        </div>
+      </Panel>
+
+      <Panel title="TPPA Parser" icon={<Crosshair size={17} />} className="tppa-parser-panel">
+        <div className="tppa-parser-grid">
+          <DataTable rows={tppaRows} />
+          <pre className="raw-event-block">{latestTppaEvent?.rawText || latestTppaEvent?.detail || 'No TPPA event payload captured yet.'}</pre>
+        </div>
       </Panel>
 
       <Panel title="Events" icon={<ListTree size={17} />}>
@@ -3975,9 +5133,123 @@ function LogsTab({
   );
 }
 
+function SettingsTab({
+  demoMode,
+  onTransferBusyChange,
+  appSettings,
+  sessionRoot,
+  storageBusy,
+  onUpdateAppSettings,
+  onChooseSessionRoot,
+  onClearSessionRoot
+}: {
+  demoMode: boolean;
+  onTransferBusyChange: (busy: boolean) => void;
+  appSettings: AppSettings;
+  sessionRoot: string | null;
+  storageBusy: boolean;
+  onUpdateAppSettings: (updates: Partial<AppSettings>) => void;
+  onChooseSessionRoot: () => Promise<void>;
+  onClearSessionRoot: () => Promise<void>;
+}) {
+  const [ninaAddress, setNinaAddress] = useState(appSettings.ninaOrigin);
+  const [stellariumAddress, setStellariumAddress] = useState(appSettings.stellariumOrigin);
+  const [connectionError, setConnectionError] = useState('');
+  useEffect(() => {
+    setNinaAddress(appSettings.ninaOrigin);
+    setStellariumAddress(appSettings.stellariumOrigin);
+  }, [appSettings.ninaOrigin, appSettings.stellariumOrigin]);
+  const saveConnections = () => {
+    try {
+      const ninaOrigin = normalizeServerAddress(ninaAddress);
+      const stellariumOrigin = normalizeServerAddress(stellariumAddress);
+      setConnectionError('');
+      onUpdateAppSettings({ ninaOrigin, stellariumOrigin });
+    } catch (error) { setConnectionError(error instanceof Error ? error.message : 'Invalid server address.'); }
+  };
+  const setPreviewRenderSize = (value: string) => {
+    if (isPreviewRenderSize(value)) {
+      onUpdateAppSettings({ previewRenderSize: value });
+    }
+  };
+
+  return (
+    <div className="tab-grid settings-grid">
+      <Panel title="Connections" icon={<Wifi size={17} />} className="settings-connections-panel">
+        <div className="settings-list">
+          <label className="settings-field">
+            <span>NINA address</span>
+            <input type="url" value={ninaAddress} onChange={(event) => setNinaAddress(event.target.value)} spellCheck={false} />
+          </label>
+          <label className="settings-field">
+            <span>Stellarium address</span>
+            <input type="url" value={stellariumAddress} onChange={(event) => setStellariumAddress(event.target.value)} spellCheck={false} />
+          </label>
+        </div>
+        <div className="button-row">
+          <button type="button" onClick={saveConnections}><Save size={16} />Save Connections</button>
+          {connectionError ? <div className="inline-note" role="alert">{connectionError}</div> : null}
+        </div>
+      </Panel>
+      <FrameTransferPanel
+        demoMode={demoMode}
+        onTransferBusyChange={onTransferBusyChange}
+        appSettings={appSettings}
+        sessionRoot={sessionRoot}
+        storageBusy={storageBusy}
+        onUpdateAppSettings={onUpdateAppSettings}
+        onChooseSessionRoot={onChooseSessionRoot}
+        onClearSessionRoot={onClearSessionRoot}
+      />
+
+      <Panel title="Preview" icon={<Aperture size={17} />} className="settings-preview-panel">
+        <div className="settings-list">
+          <label className="settings-check">
+            <input
+              checked={appSettings.autoLoadLatestFrame}
+              type="checkbox"
+              onChange={(event) => onUpdateAppSettings({ autoLoadLatestFrame: event.target.checked })}
+            />
+            <span>
+              <strong>Load latest transferred frame</strong>
+              <em>Let Acquisition pick up the newest transferred frame automatically.</em>
+            </span>
+          </label>
+          <label className="settings-check">
+            <input
+              checked={appSettings.autoRenderFitsOnArrival}
+              type="checkbox"
+              disabled={!appSettings.autoLoadLatestFrame}
+              onChange={(event) => onUpdateAppSettings({ autoRenderFitsOnArrival: event.target.checked })}
+            />
+            <span>
+              <strong>Render FITS on arrival</strong>
+              <em>Convert the newest FITS into a preview image as soon as it appears.</em>
+            </span>
+          </label>
+          <label className="settings-field">
+            <span>FITS preview size</span>
+            <select value={appSettings.previewRenderSize} onChange={(event) => setPreviewRenderSize(event.target.value)}>
+              <option value="fast">Fast</option>
+              <option value="balanced">Balanced</option>
+              <option value="detail">Detail</option>
+            </select>
+          </label>
+        </div>
+      </Panel>
+    </div>
+  );
+}
+
 function App() {
+  const connections = useSyncExternalStore(connectionClient.subscribe, connectionClient.getSnapshot);
+  const [connectionsReady, setConnectionsReady] = useState(false);
+  const [settingsHydrated, setSettingsHydrated] = useState(!tauriClient.isDesktopRuntime());
+  const [operationGate] = useState(() => new OperationGate());
+  const [transferActive, setTransferActive] = useState(false);
   const [initialPlannerState] = useState(loadPlannerState);
   const [demoMode, setDemoMode] = useState(() => settingsClient.loadBoolean('astro-demo-mode'));
+  const [appSettings, setAppSettings] = useState(loadAppSettings);
   const {
     equipment,
     lastAutofocus,
@@ -3988,7 +5260,7 @@ function App() {
     error,
     lastRefresh,
     refresh
-  } = useNinaStatus(demoMode);
+  } = useNinaStatus(demoMode, settingsHydrated && connectionsReady);
   const { socketStatus, events, acquisitionEvents } = useNinaEvents(httpStatus === 'online');
   const [activeTab, setActiveTab] = useState<TabKey>(initialPlannerState.activeTab ?? 'setup');
   const [commandMessage, setCommandMessage] = useState('');
@@ -4002,7 +5274,6 @@ function App() {
   const [coolingTarget, setCoolingTarget] = useState(-10);
   const [coolingMinutes, setCoolingMinutes] = useState(-1);
   const [coolingTask, setCoolingTask] = useState<CoolingTask>('');
-  const [settingsHydrated, setSettingsHydrated] = useState(!tauriClient.isDesktopRuntime());
   const [sessionRoot, setSessionRoot] = useState<string | null>(null);
   const [storageBusy, setStorageBusy] = useState(false);
   const [tppaSettings, setTppaSettings] = useState<TppaSettings>({
@@ -4024,8 +5295,28 @@ function App() {
     { key: 'setup', label: 'Setup' },
     { key: 'targeting', label: 'Targeting' },
     { key: 'acquisition', label: 'Acquisition' },
-    { key: 'logs', label: 'Logs' }
+    { key: 'review', label: 'Review' },
+    { key: 'settings', label: 'Settings' },
+    { key: 'diagnostics', label: 'Diagnostics' }
   ], []);
+
+  const updateAppSettings = useCallback((updates: Partial<AppSettings>) => {
+    if ((updates.ninaOrigin || updates.stellariumOrigin) && (operationGate.current || commandBusy || transferActive)) {
+      setCommandMessage('Finish or stop the active operation before changing server addresses.');
+      return;
+    }
+    setAppSettings((current) => loadAppSettings({ ...current, ...updates }));
+  }, [operationGate, commandBusy, transferActive]);
+
+  useEffect(() => {
+    if (!settingsHydrated) return;
+    try { connectionClient.configure(appSettings); setConnectionsReady(true); }
+    catch (error) { setConnectionsReady(false); setCommandMessage(`Invalid saved connection settings: ${String(error)}`); return; }
+    settingsClient.saveJson(appSettingsStorageKey, appSettings);
+    settingsClient.saveBoolean(autoTransferStorageKey, appSettings.autoTransferEnabled);
+    settingsClient.saveJson(frameAgentStorageKey, { base: appSettings.agentBase });
+    frameTransferClient.setAgentBase(appSettings.agentBase);
+  }, [appSettings, settingsHydrated]);
 
   useEffect(() => {
     if (!tauriClient.isDesktopRuntime()) {
@@ -4045,9 +5336,14 @@ function App() {
         const storedDemoMode = settings['astro-demo-mode'];
         const storedPlanner = settings[plannerStorageKey];
         const storedSessionRoot = settings['storage-session-root'];
+        const storedAppSettings = settings[appSettingsStorageKey];
 
         if (typeof storedDemoMode === 'boolean') {
           setDemoMode(storedDemoMode);
+        }
+
+        if (storedAppSettings && typeof storedAppSettings === 'object' && !Array.isArray(storedAppSettings)) {
+          setAppSettings(loadAppSettings(storedAppSettings as Partial<AppSettings>));
         }
 
         if (typeof storedSessionRoot === 'string' && storedSessionRoot.trim()) {
@@ -4057,8 +5353,10 @@ function App() {
         if (storedPlanner && typeof storedPlanner === 'object' && !Array.isArray(storedPlanner)) {
           const planner = storedPlanner as Partial<PersistedPlannerState>;
 
-          if (planner.activeTab) {
-            setActiveTab(planner.activeTab);
+          const nextActiveTab = normalizeTabKey(planner.activeTab);
+
+          if (nextActiveTab) {
+            setActiveTab(nextActiveTab);
           }
 
           if ('target' in planner) {
@@ -4120,10 +5418,10 @@ function App() {
       return undefined;
     }
 
-    const socket = ninaClient.openTppaSocket();
+    const socket = ninaClient.openTppaSocket(true);
     let closed = false;
 
-    setTppaWorkflow((current) => ({ ...current, socket: 'connecting' }));
+    setTppaWorkflow({ ...defaultTppaWorkflow, socket: 'connecting', status: 'Connecting to TPPA socket.' });
 
     socket.addEventListener('open', () => {
       if (!closed) {
@@ -4132,6 +5430,7 @@ function App() {
     });
 
     socket.addEventListener('message', (message) => {
+      if (closed) return;
       let raw: unknown = message.data;
       try {
         raw = JSON.parse(String(message.data));
@@ -4166,7 +5465,7 @@ function App() {
       closed = true;
       socket.close();
     };
-  }, [demoMode, httpStatus]);
+  }, [demoMode, httpStatus, connections]);
 
   useEffect(() => {
     if (!settingsHydrated) {
@@ -4185,6 +5484,10 @@ function App() {
   }, [activeQueueId, activeTab, queue, sequencePlan, settingsHydrated, target]);
 
   const runAutofocus = async (cancel = false) => {
+    if (!cancel && operationGate.current) {
+      setCommandMessage('Finish or stop the active acquisition operation first.');
+      return;
+    }
     if (demoMode) {
       if (cancel) {
         setCommandBusy('');
@@ -4278,7 +5581,46 @@ function App() {
     }
   };
 
+  const runMountTracking = async (mode: 0 | 4) => {
+    if (operationGate.current) {
+      setCommandMessage('Finish or stop the active acquisition operation before changing tracking.');
+      return;
+    }
+    const label = mode === 0 ? 'Sidereal tracking' : 'Stop tracking';
+
+    if (demoMode) {
+      setCommandMessage(`Demo mount command: ${label}.`);
+      return;
+    }
+
+    if (mode === 4 && !window.confirm('Stop mount tracking?')) {
+      return;
+    }
+
+    setCommandBusy(`mount-tracking-${mode}`);
+    setCommandMessage('');
+
+    try {
+      const { response, body } = await ninaClient.setMountTracking(mode);
+
+      if (!response.ok || !body.Success) {
+        throw new Error(body.Error || body.Response || `Mount tracking command failed with HTTP ${response.status}.`);
+      }
+
+      setCommandMessage(mode === 0 ? 'Sidereal tracking enabled.' : 'Mount tracking stopped.');
+      await refresh();
+    } catch (caught) {
+      setCommandMessage(caught instanceof Error ? caught.message : `${label} failed.`);
+    } finally {
+      setCommandBusy('');
+    }
+  };
+
   const runTppa = async (action: string) => {
+    if (operationGate.current && action !== 'stop-alignment') {
+      setCommandMessage('Finish or stop the active acquisition operation first.');
+      return;
+    }
     if (demoMode) {
       setCommandMessage(`Demo TPPA command: ${action}`);
       setTppaWorkflow((current) => ({
@@ -4311,7 +5653,7 @@ function App() {
 
     try {
       const result = await ninaClient.sendTppaCommand(action, tppaSettings);
-      setCommandMessage(result);
+      setCommandMessage(action === 'stop-alignment' ? `${result} Mount tracking may be off after TPPA stop.` : result);
       let raw: unknown = { Response: result, Type: action };
       try {
         raw = JSON.parse(result);
@@ -4324,7 +5666,9 @@ function App() {
         ...current,
         ...update,
         step: update.step || action,
-        status: update.status || result,
+        status: action === 'stop-alignment'
+          ? `${update.status || result} Mount tracking may be off.`
+          : update.status || result,
         instruction: update.instruction || current.instruction,
         rawEvents: [...(update.rawEvents ?? []), ...current.rawEvents].slice(0, 20)
       }));
@@ -4352,7 +5696,7 @@ function App() {
     setTargetError('');
 
     try {
-      const response = await fetchWithTimeout(`${stellariumBase}/objects/info?format=map`, 3500);
+      const response = await fetchWithTimeout(connectionClient.endpoint('stellarium', 'objects/info?format=map'), 3500);
       if (!response.ok) {
         throw new Error(`Stellarium returned HTTP ${response.status}.`);
       }
@@ -4421,6 +5765,10 @@ function App() {
   };
 
   const chooseSessionRoot = async () => {
+    if (transferActive) {
+      setCommandMessage('Wait for the active transfer before changing its destination.');
+      return;
+    }
     if (!tauriClient.isDesktopRuntime()) {
       setCommandMessage('Folder selection is available in the desktop app.');
       return;
@@ -4444,6 +5792,10 @@ function App() {
   };
 
   const clearSessionRoot = async () => {
+    if (transferActive) {
+      setCommandMessage('Wait for the active transfer before clearing its destination.');
+      return;
+    }
     setStorageBusy(true);
     setCommandMessage('');
 
@@ -4459,6 +5811,10 @@ function App() {
   };
 
   const toggleDemoMode = () => {
+    if (operationGate.current || commandBusy || transferActive) {
+      setCommandMessage('Finish or stop the active operation before changing demo mode.');
+      return;
+    }
     setDemoMode((current) => {
       const next = !current;
       settingsClient.saveBoolean('astro-demo-mode', next);
@@ -4468,6 +5824,7 @@ function App() {
   };
 
   const visibleEvents = demoMode ? demoEvents : events;
+  const visibleAcquisitionEvents = demoMode ? demoAcquisitionEvents : acquisitionEvents;
   const activeQueueItem = queue.find((item) => item.id === activeQueueId) ?? queue[0] ?? null;
 
   return (
@@ -4522,6 +5879,7 @@ function App() {
           coolingTask={coolingTask}
           runCameraCooling={runCameraCooling}
           runAutofocus={runAutofocus}
+          runMountTracking={runMountTracking}
           runTppa={runTppa}
           tppaSettings={tppaSettings}
           tppaWorkflow={tppaWorkflow}
@@ -4555,27 +5913,44 @@ function App() {
           onClearQueue={clearQueue}
         />
       ) : null}
-      {activeTab === 'acquisition' ? (
+      {/* Keep operational panels mounted so navigation cannot discard their work. */}
+      {settingsHydrated && connectionsReady ? <div hidden={activeTab !== 'acquisition'}>
         <AcquisitionTab
+          operationGate={operationGate}
+          externalBusy={Boolean(commandBusy) || Boolean(equipment?.Focuser?.IsMoving)}
           equipment={equipment}
           activeItem={activeQueueItem}
           queue={queue}
           sessionRoot={sessionRoot}
           acquisitionEvents={acquisitionEvents}
           demoMode={demoMode}
+          appSettings={appSettings}
+          onNavigate={setActiveTab}
+          onRefreshEquipment={refresh}
           onSetActiveQueueItem={setActiveQueueId}
         />
-      ) : null}
-      {activeTab === 'logs' ? (
-        <LogsTab
+      </div> : null}
+      {settingsHydrated ? <div hidden={activeTab !== 'settings'}>
+        <SettingsTab
+          demoMode={demoMode}
+          onTransferBusyChange={setTransferActive}
+          appSettings={appSettings}
+          sessionRoot={sessionRoot}
+          storageBusy={storageBusy}
+          onUpdateAppSettings={updateAppSettings}
+          onChooseSessionRoot={chooseSessionRoot}
+          onClearSessionRoot={clearSessionRoot}
+        />
+      </div> : null}
+      {settingsHydrated ? <div hidden={activeTab !== 'review'}><SessionReview active={activeTab === 'review'} /></div> : null}
+      {activeTab === 'diagnostics' ? (
+        <DiagnosticsTab
           events={visibleEvents}
+          acquisitionEvents={visibleAcquisitionEvents}
+          tppaWorkflow={tppaWorkflow}
           error={error}
           apiVersion={apiVersion}
           ninaVersion={ninaVersion}
-          sessionRoot={sessionRoot}
-          storageBusy={storageBusy}
-          onChooseSessionRoot={chooseSessionRoot}
-          onClearSessionRoot={clearSessionRoot}
         />
       ) : null}
     </main>

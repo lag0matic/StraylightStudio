@@ -45,8 +45,9 @@ The app should be organized around real astrophotography workflows:
 - Persistent status bar: miniPC connection plus camera, mount, focuser, and guiding status lights.
 - Setup tab: camera setup, cooling, focus/autofocus, Three Point Polar Alignment workflow and adjustment instructions, mount and guider readiness.
 - Targeting tab: Stellarium import, target details, framing, sequence preparation, and run plan.
-- Acquisition tab: current capture state, live frame preview, PHD2 guiding graph, non-destructive preview stretching, delivery status, and quality checks.
-- Logs tab: timestamped events, API status, errors, and diagnostics.
+- Acquisition tab: Prepare Target, current capture state, live frame preview, PHD2 guiding graph, non-destructive preview stretching, delivery status, and quality checks.
+- Settings tab: local image destination, frame-agent URL, auto-transfer behavior, and frame transfer monitor.
+- Diagnostics tab: timestamped events, API status, raw event inspection, capability checks, and parser probes.
 
 The first screen should be the actual working session view, not a landing page.
 
@@ -111,7 +112,7 @@ Use plain operational language:
 
 - `Import From Stellarium`
 - `Add To Tonight`
-- `Slew And Center`
+- `Prepare Target`
 - `Start Sequence`
 - `Abort`
 - `Warm Camera`

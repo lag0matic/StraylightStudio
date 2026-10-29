@@ -1,3 +1,6 @@
+import { connectionClient } from './connectionClient';
+import { networkFetch, networkSocket } from './networkClient';
+
 export type ApiEnvelope<T> = {
   Response: T;
   Error: string;
@@ -37,37 +40,18 @@ export type SavedCaptureSettings = {
   targetName: string;
 };
 
-const apiBase = import.meta.env.VITE_NINA_HTTP_BASE || '/nina-api';
-const wsUrl =
-  import.meta.env.VITE_NINA_WS_URL ||
-  `${window.location.protocol === 'https:' ? 'wss' : 'ws'}://${window.location.host}/nina-ws`;
-const tppaWsUrl =
-  import.meta.env.VITE_NINA_TPPA_WS_URL ||
-  `${window.location.protocol === 'https:' ? 'wss' : 'ws'}://${window.location.host}/nina-tppa`;
-
-async function fetchWithTimeout(url: string, timeoutMs = 3000) {
-  const controller = new AbortController();
-  const timeout = window.setTimeout(() => controller.abort(), timeoutMs);
-
-  try {
-    return await fetch(url, { signal: controller.signal });
-  } finally {
-    window.clearTimeout(timeout);
-  }
-}
-
 async function getJson<T>(path: string, timeoutMs = 6000) {
-  const response = await fetchWithTimeout(`${apiBase}/${path}`, timeoutMs);
+  const response = await networkFetch(connectionClient.endpoint('nina', path), timeoutMs);
   const body = (await response.json()) as ApiEnvelope<T>;
   return { response, body };
 }
 
-function openEventSocket() {
-  return new WebSocket(wsUrl);
+function openEventSocket(reconnect = false) {
+  return networkSocket(connectionClient.socketUrl(false), reconnect);
 }
 
-function openTppaSocket() {
-  return new WebSocket(tppaWsUrl);
+function openTppaSocket(reconnect = false) {
+  return networkSocket(connectionClient.socketUrl(true), reconnect);
 }
 
 function sendTppaCommand(action: string, settings: TppaCommandSettings) {
@@ -83,7 +67,7 @@ function sendTppaCommand(action: string, settings: TppaCommandSettings) {
         Action: action,
         ManualMode: settings.manualMode,
         StartFromCurrentPosition: settings.startFromCurrentPosition,
-        DirectionEast: settings.directionEast,
+        EastDirection: settings.directionEast,
         TargetDistance: settings.targetDistance,
         MoveRate: settings.moveRate,
         ExposureTime: settings.exposureTime,
@@ -102,7 +86,12 @@ function sendTppaCommand(action: string, settings: TppaCommandSettings) {
 
     socket.addEventListener('error', () => {
       window.clearTimeout(timeout);
+      socket.close();
       reject(new Error('TPPA WebSocket command failed.'));
+    });
+    socket.addEventListener('close', () => {
+      window.clearTimeout(timeout);
+      reject(new Error('TPPA connection closed before a response arrived.'));
     });
   });
 }
@@ -134,6 +123,44 @@ async function abortExposure() {
   return getJson<string>('equipment/camera/abort-exposure', 8000);
 }
 
+async function setMountTracking(mode: 0 | 1 | 2 | 3 | 4) {
+  return getJson<string>(`equipment/mount/tracking?mode=${mode}`, 8000);
+}
+
+async function unparkMount() {
+  return getJson<string>('equipment/mount/unpark', 12000);
+}
+
+async function slewMount(settings: {
+  raDegrees: number;
+  decDegrees: number;
+  waitForResult?: boolean;
+  center?: boolean;
+  rotate?: boolean;
+  rotationAngle?: number;
+}, timeoutMs = 600000) {
+  const params = new URLSearchParams({
+    ra: String(settings.raDegrees),
+    dec: String(settings.decDegrees),
+    waitForResult: String(settings.waitForResult ?? true),
+    center: String(settings.center ?? true)
+  });
+
+  if (settings.rotate !== undefined) {
+    params.set('rotate', String(settings.rotate));
+  }
+
+  if (settings.rotationAngle !== undefined) {
+    params.set('rotationAngle', String(settings.rotationAngle));
+  }
+
+  return getJson<string>(`equipment/mount/slew?${params.toString()}`, timeoutMs);
+}
+
+async function stopMountSlew() {
+  return getJson<string>('equipment/mount/slew/stop', 12000);
+}
+
 async function capturePreview(settings: PreviewCaptureSettings, timeoutMs: number) {
   const params = new URLSearchParams({
     duration: String(settings.duration),
@@ -149,7 +176,7 @@ async function capturePreview(settings: PreviewCaptureSettings, timeoutMs: numbe
     skipAutoStretch: 'false'
   });
 
-  return fetchWithTimeout(`${apiBase}/equipment/camera/capture?${params.toString()}`, timeoutMs);
+  return networkFetch(connectionClient.endpoint('nina', `equipment/camera/capture?${params.toString()}`), timeoutMs);
 }
 
 async function captureSavedFrame(settings: SavedCaptureSettings, timeoutMs: number) {
@@ -173,9 +200,9 @@ async function getCaptureStatistics<T>() {
 
 export const ninaClient = {
   urls: {
-    apiBase,
-    wsUrl,
-    tppaWsUrl
+    get apiBase() { return connectionClient.endpoint('nina', '').replace(/\/$/, ''); },
+    get wsUrl() { return connectionClient.socketUrl(false); },
+    get tppaWsUrl() { return connectionClient.socketUrl(true); }
   },
   getJson,
   openEventSocket,
@@ -185,6 +212,10 @@ export const ninaClient = {
   coolCamera,
   warmCamera,
   abortExposure,
+  setMountTracking,
+  unparkMount,
+  slewMount,
+  stopMountSlew,
   capturePreview,
   captureSavedFrame,
   getCaptureStatistics

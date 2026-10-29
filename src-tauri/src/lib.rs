@@ -1,8 +1,12 @@
 use std::{
     collections::HashMap,
     fs,
-    path::PathBuf,
-    sync::{Mutex, OnceLock},
+    io::{Read, Write},
+    path::{Path, PathBuf},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Mutex, OnceLock,
+    },
     time::SystemTime,
 };
 
@@ -11,6 +15,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Manager};
+mod network;
+mod fits_analysis;
+mod review;
 
 const STORAGE_SESSION_ROOT_KEY: &str = "storage-session-root";
 
@@ -43,6 +50,16 @@ struct WriteFrameRequest {
     frame_number: u32,
     captured_at: Option<String>,
     data_base64: String,
+    expected_sha256: String,
+    expected_size_bytes: u64,
+}
+
+#[derive(Debug, Deserialize)]
+struct ExistingFrameRequest {
+    session_folder: String,
+    file_name: String,
+    sha256: String,
+    size_bytes: u64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -81,15 +98,31 @@ struct WriteFrameResult {
 }
 
 #[derive(Debug, Serialize)]
+struct ExistingFrameResult {
+    found: bool,
+    frame: Option<FrameManifestEntry>,
+    manifest_path: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
 struct FitsPreviewResult {
+    analysis: Option<fits_analysis::FitsAnalysis>,
     data_url: String,
     width: u32,
     height: u32,
     source_path: String,
+    size_bytes: u64,
+    header: Vec<FitsHeaderCard>,
     color: bool,
     black_point: f64,
     midtone: f64,
     white_point: f64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct FitsHeaderCard {
+    key: String,
+    value: String,
 }
 
 #[derive(Debug)]
@@ -107,12 +140,15 @@ enum BayerColor {
 
 #[derive(Debug, Clone)]
 struct CachedFitsPreview {
+    analysis: Option<fits_analysis::FitsAnalysis>,
     path: PathBuf,
     modified: Option<SystemTime>,
+    size_bytes: u64,
     max_size: u32,
     width: u32,
     height: u32,
     source_path: String,
+    header: Vec<FitsHeaderCard>,
     values: Vec<[f64; 3]>,
     auto_black: f64,
     auto_white: f64,
@@ -242,7 +278,93 @@ fn read_session_manifest(path: &PathBuf, session_folder: &str) -> Result<Session
 
 fn write_session_manifest(path: &PathBuf, manifest: &SessionManifest) -> Result<(), String> {
     let body = serde_json::to_string_pretty(manifest).map_err(|error| error.to_string())?;
-    fs::write(path, format!("{body}\n")).map_err(|error| error.to_string())
+    let (temporary, mut file) = TemporaryFile::create(path.parent().ok_or("manifest has no parent")?)?;
+    file.write_all(body.as_bytes()).map_err(|error| error.to_string())?;
+    file.sync_all().map_err(|error| error.to_string())?;
+    drop(file);
+    verify_file(&temporary.0, &sha256_hex(body.as_bytes()), body.len() as u64)?;
+    fs::rename(&temporary.0, path).map_err(|error| format!("Could not publish manifest: {error}"))?;
+    sync_directory(path.parent().unwrap())
+}
+
+static FRAME_WRITE_LOCK: Mutex<()> = Mutex::new(());
+static TEMPORARY_ID: AtomicU64 = AtomicU64::new(0);
+
+struct TemporaryFile(PathBuf);
+
+impl TemporaryFile {
+    fn create(directory: &Path) -> Result<(Self, fs::File), String> {
+        loop {
+            let id = TEMPORARY_ID.fetch_add(1, Ordering::Relaxed);
+            let path = directory.join(format!(".straylight-{}-{id}.partial", std::process::id()));
+            match fs::OpenOptions::new().write(true).create_new(true).open(&path) {
+                Ok(file) => return Ok((Self(path), file)),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(error) => return Err(format!("Could not create temporary image file: {error}")),
+            }
+        }
+    }
+}
+
+impl Drop for TemporaryFile {
+    fn drop(&mut self) { let _ = fs::remove_file(&self.0); }
+}
+
+fn sync_directory(path: &Path) -> Result<(), String> {
+    #[cfg(unix)]
+    fs::File::open(path).and_then(|file| file.sync_all()).map_err(|error| error.to_string())?;
+    #[cfg(not(unix))]
+    let _ = path;
+    Ok(())
+}
+
+fn verify_file(path: &Path, expected_sha: &str, expected_size: u64) -> Result<String, String> {
+    let metadata = fs::symlink_metadata(path).map_err(|error| error.to_string())?;
+    if !metadata.file_type().is_file() {
+        return Err(format!("Refusing non-regular image file: {}", path.display()));
+    }
+    let mut file = fs::File::open(path).map_err(|error| error.to_string())?;
+    let mut hash = Sha256::new();
+    let mut total = 0u64;
+    let mut buffer = [0u8; 65536];
+    loop {
+        let count = file.read(&mut buffer).map_err(|error| error.to_string())?;
+        if count == 0 { break; }
+        hash.update(&buffer[..count]);
+        total += count as u64;
+    }
+    let actual = format!("{:x}", hash.finalize());
+    if total != expected_size || actual != expected_sha {
+        return Err(format!("Image verification failed for {}: size or SHA-256 differs. Existing files are never overwritten.", path.display()));
+    }
+    Ok(actual)
+}
+
+fn image_destination(root: &Path, session: &str, name: &str) -> Result<PathBuf, String> {
+    let session = require_safe_relative_component("session folder", session)?;
+    let name = require_safe_relative_component("file name", name)?;
+    let extension = Path::new(&name).extension().and_then(|value| value.to_str()).unwrap_or("");
+    if !["fits", "fit", "fts"].iter().any(|allowed| extension.eq_ignore_ascii_case(allowed)) {
+        return Err("Image filename must end in .fits, .fit, or .fts".to_string());
+    }
+    let root = root.canonicalize().map_err(|error| error.to_string())?;
+    let directory = root.join(session);
+    fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
+    let directory = directory.canonicalize().map_err(|error| error.to_string())?;
+    if !directory.starts_with(&root) { return Err("Session folder is outside the selected image destination".to_string()); }
+    Ok(directory.join(name))
+}
+
+// A hard link publishes the complete staged file atomically without replacing a
+// competing destination. Unsupported filesystems fail closed; there is no copy fallback.
+fn publish_image(temporary: &Path, destination: &Path, sha: &str, size: u64) -> Result<String, String> {
+    verify_file(temporary, sha, size)?;
+    match fs::hard_link(temporary, destination) {
+        Ok(()) => sync_directory(destination.parent().unwrap())?,
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {},
+        Err(error) => return Err(format!("Could not safely publish image (destination must support hard links): {error}")),
+    }
+    verify_file(destination, sha, size)
 }
 
 fn parse_fits_header(bytes: &[u8]) -> Result<FitsHeader, String> {
@@ -298,6 +420,40 @@ fn fits_f64(cards: &HashMap<String, String>, key: &str, fallback: f64) -> f64 {
         .get(key)
         .and_then(|value| value.parse::<f64>().ok())
         .unwrap_or(fallback)
+}
+
+fn fits_header_cards(cards: &HashMap<String, String>) -> Vec<FitsHeaderCard> {
+    let preferred = [
+        "SIMPLE", "BITPIX", "NAXIS", "NAXIS1", "NAXIS2", "IMAGETYP", "EXPOSURE", "EXPTIME",
+        "DATE-OBS", "DATE-LOC", "OBJECT", "INSTRUME", "CAMERAID", "GAIN", "OFFSET",
+        "CCD-TEMP", "SET-TEMP", "BAYERPAT", "XBINNING", "YBINNING", "XBAYROFF", "YBAYROFF",
+        "TELESCOP", "FOCALLEN", "FOCRATIO", "FILTER", "HFR", "STARS",
+    ];
+    let mut rows = Vec::new();
+
+    for key in preferred {
+        if let Some(value) = cards.get(key) {
+            rows.push(FitsHeaderCard {
+                key: key.to_string(),
+                value: value.clone(),
+            });
+        }
+    }
+
+    let mut extra: Vec<_> = cards
+        .iter()
+        .filter(|(key, _)| !preferred.contains(&key.as_str()))
+        .collect();
+    extra.sort_by(|(left, _), (right, _)| left.cmp(right));
+
+    for (key, value) in extra.into_iter().take(80usize.saturating_sub(rows.len())) {
+        rows.push(FitsHeaderCard {
+            key: key.clone(),
+            value: value.clone(),
+        });
+    }
+
+    rows
 }
 
 fn read_fits_value(
@@ -558,15 +714,16 @@ fn sample_fits_preview(
     request: &FitsPreviewRequest,
     path: PathBuf,
     modified: Option<SystemTime>,
+    analyze: bool,
 ) -> Result<CachedFitsPreview, String> {
     let header = parse_fits_header(bytes)?;
     let naxis = fits_i64(&header.cards, "NAXIS")?;
-    if naxis < 2 {
-        return Err("FITS image must have at least two axes".to_string());
+    if naxis != 2 {
+        return Err("FITS preview currently supports two-dimensional images only".to_string());
     }
 
-    let source_width = fits_i64(&header.cards, "NAXIS1")? as usize;
-    let source_height = fits_i64(&header.cards, "NAXIS2")? as usize;
+    let source_width = usize::try_from(fits_i64(&header.cards, "NAXIS1")?).ok().filter(|v| *v > 0).ok_or("Invalid FITS width")?;
+    let source_height = usize::try_from(fits_i64(&header.cards, "NAXIS2")?).ok().filter(|v| *v > 0).ok_or("Invalid FITS height")?;
     let bitpix = fits_i64(&header.cards, "BITPIX")?;
     let bzero = fits_f64(&header.cards, "BZERO", 0.0);
     let bscale = fits_f64(&header.cards, "BSCALE", 1.0);
@@ -586,7 +743,11 @@ fn sample_fits_preview(
     let data = bytes
         .get(header.data_offset..)
         .ok_or_else(|| "FITS data section is missing".to_string())?;
+    let bytes_per_sample = match bitpix { 8 => 1, 16 => 2, 32 | -32 => 4, -64 => 8, _ => return Err("Unsupported FITS BITPIX".into()) };
+    let required = source_width.checked_mul(source_height).and_then(|count| count.checked_mul(bytes_per_sample)).ok_or("FITS dimensions overflow")?;
+    if data.len() < required { return Err("FITS data ended unexpectedly".into()); }
     let mut sampled_values = Vec::with_capacity(width * height);
+    let analysis = if analyze { Some(fits_analysis::analyze(data, &header, source_width, source_height)?) } else { None };
     let mut stretch_values = Vec::with_capacity(width * height);
 
     for y in 0..height {
@@ -660,12 +821,15 @@ fn sample_fits_preview(
     let (auto_black, auto_white) = auto_stretch_bounds(&stretch_values);
 
     Ok(CachedFitsPreview {
+        analysis,
         path,
         modified,
+        size_bytes: bytes.len() as u64,
         max_size,
         width: width as u32,
         height: height as u32,
         source_path: request.path.clone(),
+        header: fits_header_cards(&header.cards),
         values: sampled_values,
         auto_black,
         auto_white,
@@ -713,10 +877,13 @@ fn render_cached_fits_preview(
     }
 
     Ok(FitsPreviewResult {
+        analysis: preview.analysis.clone(),
         data_url: bmp_data_url_from_rgb(preview.width, preview.height, &pixels)?,
         width: preview.width,
         height: preview.height,
         source_path: preview.source_path.clone(),
+        size_bytes: preview.size_bytes,
+        header: preview.header.clone(),
         color: preview.color,
         black_point: black,
         midtone,
@@ -729,7 +896,39 @@ fn render_fits_to_preview(
     bytes: &[u8],
     request: &FitsPreviewRequest,
 ) -> Result<FitsPreviewResult, String> {
-    let preview = sample_fits_preview(bytes, request, PathBuf::from(&request.path), None)?;
+    let preview = sample_fits_preview(bytes, request, PathBuf::from(&request.path), None, true)?;
+    render_cached_fits_preview(&preview, request)
+}
+
+fn render_fits_preview_from_path(
+    path: PathBuf,
+    request: &FitsPreviewRequest,
+) -> Result<FitsPreviewResult, String> {
+    let max_size = request.max_size.unwrap_or(1400).clamp(128, 2400);
+    let metadata = fs::metadata(&path).map_err(|error| error.to_string())?;
+    let modified = metadata.modified().ok();
+    let cache = fits_preview_cache();
+    let cached_preview = {
+        let guard = cache.lock().map_err(|error| error.to_string())?;
+
+        guard
+            .as_ref()
+            .filter(|preview| {
+                preview.path == path && preview.modified == modified && preview.size_bytes == metadata.len() && preview.max_size == max_size
+            })
+            .cloned()
+    };
+    let preview = if let Some(preview) = cached_preview {
+        preview
+    } else {
+        let bytes = fs::read(&path).map_err(|error| error.to_string())?;
+        let mut preview = sample_fits_preview(&bytes, request, path.clone(), modified, true)?;
+        preview.size_bytes = metadata.len();
+        let mut guard = cache.lock().map_err(|error| error.to_string())?;
+        *guard = Some(preview.clone());
+        preview
+    };
+
     render_cached_fits_preview(&preview, request)
 }
 
@@ -863,28 +1062,54 @@ fn prepare_session_folder(app: AppHandle, session_folder: String) -> Result<Stri
 
 #[tauri::command]
 fn write_frame(app: AppHandle, request: WriteFrameRequest) -> Result<WriteFrameResult, String> {
+    let root = storage_root_from_settings(&app)?;
+    store_frame(&root, request)
+}
+
+fn store_frame(root: &Path, request: WriteFrameRequest) -> Result<WriteFrameResult, String> {
+    store_frame_with_commit(root, request, write_session_manifest)
+}
+
+fn store_frame_with_commit(
+    root: &Path,
+    request: WriteFrameRequest,
+    commit_manifest: impl FnOnce(&PathBuf, &SessionManifest) -> Result<(), String>,
+) -> Result<WriteFrameResult, String> {
+    let _guard = FRAME_WRITE_LOCK.lock().map_err(|_| "Image storage lock failed")?;
     let safe_session_folder =
         require_safe_relative_component("session folder", &request.session_folder)?;
     let safe_file_name = require_safe_relative_component("file name", &request.file_name)?;
-    let root = storage_root_from_settings(&app)?;
-    let session_dir = root.join(&safe_session_folder);
-
-    fs::create_dir_all(&session_dir).map_err(|error| error.to_string())?;
+    let expected_sha = request.expected_sha256.trim().to_lowercase();
+    if expected_sha.len() != 64 || !expected_sha.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err("Expected image SHA-256 must contain 64 hexadecimal characters".to_string());
+    }
 
     let bytes = BASE64_STANDARD
         .decode(request.data_base64.as_bytes())
         .map_err(|error| error.to_string())?;
-    let frame_path = session_dir.join(&safe_file_name);
-    fs::write(&frame_path, &bytes).map_err(|error| error.to_string())?;
-
+    if bytes.is_empty() || bytes.len() as u64 != request.expected_size_bytes || sha256_hex(&bytes) != expected_sha {
+        return Err("Downloaded image does not match the expected size and SHA-256".to_string());
+    }
+    let frame_path = image_destination(root, &safe_session_folder, &safe_file_name)?;
+    let session_dir = frame_path.parent().unwrap().to_path_buf();
     let manifest_file = manifest_path(&session_dir);
     let mut manifest = read_session_manifest(&manifest_file, &safe_session_folder)?;
+    if fs::symlink_metadata(&frame_path).is_ok() {
+        verify_file(&frame_path, &expected_sha, request.expected_size_bytes)?;
+    } else {
+        let (temporary, mut file) = TemporaryFile::create(&session_dir)?;
+        file.write_all(&bytes).map_err(|error| error.to_string())?;
+        file.sync_all().map_err(|error| error.to_string())?;
+        drop(file);
+        publish_image(&temporary.0, &frame_path, &expected_sha, request.expected_size_bytes)?;
+    }
+    let verified_sha = verify_file(&frame_path, &expected_sha, request.expected_size_bytes)?;
     let frame = FrameManifestEntry {
         frame_number: request.frame_number.max(1),
         file_name: safe_file_name,
         path: frame_path.to_string_lossy().to_string(),
         size_bytes: bytes.len() as u64,
-        sha256: sha256_hex(&bytes),
+        sha256: verified_sha,
         image_type: request.image_type,
         target_name: request.target_name,
         captured_at: request.captured_at,
@@ -904,11 +1129,60 @@ fn write_frame(app: AppHandle, request: WriteFrameRequest) -> Result<WriteFrameR
         captured_at: frame.captured_at.clone(),
     });
     manifest.frames.sort_by_key(|entry| entry.frame_number);
-    write_session_manifest(&manifest_file, &manifest)?;
+    commit_manifest(&manifest_file, &manifest)?;
+    verify_file(&frame_path, &expected_sha, request.expected_size_bytes)?;
 
     Ok(WriteFrameResult {
         frame,
         manifest_path: manifest_file.to_string_lossy().to_string(),
+    })
+}
+
+#[tauri::command]
+fn find_existing_frame(
+    app: AppHandle,
+    request: ExistingFrameRequest,
+) -> Result<ExistingFrameResult, String> {
+    let root = storage_root_from_settings(&app)?;
+    find_verified_frame(&root, request)
+}
+
+fn find_verified_frame(root: &Path, request: ExistingFrameRequest) -> Result<ExistingFrameResult, String> {
+    let _guard = FRAME_WRITE_LOCK.lock().map_err(|_| "Image storage lock failed")?;
+    let safe_session_folder =
+        require_safe_relative_component("session folder", &request.session_folder)?;
+    let safe_file_name = require_safe_relative_component("file name", &request.file_name)?;
+    let expected_sha = request.sha256.trim().to_lowercase();
+    let frame_path = image_destination(root, &safe_session_folder, &safe_file_name)?;
+    let session_dir = frame_path.parent().unwrap().to_path_buf();
+    let manifest_file = manifest_path(&session_dir);
+
+    if manifest_file.exists() {
+        let manifest = read_session_manifest(&manifest_file, &safe_session_folder)?;
+
+        if let Some(mut entry) = manifest.frames.into_iter().find(|entry| {
+            entry.file_name == safe_file_name && entry.sha256.eq_ignore_ascii_case(&expected_sha)
+        }) {
+            if frame_path.is_file() {
+                verify_file(&frame_path, &expected_sha, request.size_bytes)?;
+                entry.size_bytes = request.size_bytes;
+                entry.path = frame_path.to_string_lossy().to_string();
+                return Ok(ExistingFrameResult {
+                    found: true,
+                    frame: Some(entry),
+                    manifest_path: Some(manifest_file.to_string_lossy().to_string()),
+                });
+            }
+        }
+    }
+
+    // Revisit the writer to repair missing manifest entries from agent metadata
+    // before acknowledging an image left by an interrupted transfer.
+
+    Ok(ExistingFrameResult {
+        found: false,
+        frame: None,
+        manifest_path: manifest_file.exists().then(|| manifest_file.to_string_lossy().to_string()),
     })
 }
 
@@ -918,32 +1192,20 @@ fn render_fits_preview(
     request: FitsPreviewRequest,
 ) -> Result<FitsPreviewResult, String> {
     let path = require_path_under_storage_root(&app, &request.path)?;
-    let max_size = request.max_size.unwrap_or(1400).clamp(128, 2400);
-    let modified = fs::metadata(&path)
-        .ok()
-        .and_then(|metadata| metadata.modified().ok());
-    let cache = fits_preview_cache();
-    let cached_preview = {
-        let guard = cache.lock().map_err(|error| error.to_string())?;
+    render_fits_preview_from_path(path, &request)
+}
 
-        guard
-            .as_ref()
-            .filter(|preview| {
-                preview.path == path && preview.modified == modified && preview.max_size == max_size
-            })
-            .cloned()
-    };
-    let preview = if let Some(preview) = cached_preview {
-        preview
-    } else {
-        let bytes = fs::read(&path).map_err(|error| error.to_string())?;
-        let preview = sample_fits_preview(&bytes, &request, path.clone(), modified)?;
-        let mut guard = cache.lock().map_err(|error| error.to_string())?;
-        *guard = Some(preview.clone());
-        preview
-    };
+#[tauri::command]
+fn render_selected_fits_preview(request: FitsPreviewRequest) -> Result<FitsPreviewResult, String> {
+    let path = PathBuf::from(&request.path)
+        .canonicalize()
+        .map_err(|error| error.to_string())?;
 
-    render_cached_fits_preview(&preview, &request)
+    if !path.is_file() {
+        return Err("selected FITS path must be a file".to_string());
+    }
+
+    render_fits_preview_from_path(path, &request)
 }
 
 #[tauri::command]
@@ -970,6 +1232,12 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            review::review_open,
+            review::review_decide,
+            review::review_preview,
+            network::network_http,
+            network::network_socket,
+            network::network_socket_send,
             load_settings,
             save_settings,
             reset_settings,
@@ -981,12 +1249,17 @@ pub fn run() {
             preview_frame_path,
             prepare_session_folder,
             write_frame,
+            find_existing_frame,
             render_fits_preview,
+            render_selected_fits_preview,
             find_siril
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
+
+#[cfg(test)]
+mod storage_tests;
 
 #[cfg(test)]
 mod tests {

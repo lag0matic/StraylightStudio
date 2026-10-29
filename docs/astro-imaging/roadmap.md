@@ -45,33 +45,34 @@ No mount movement in this phase.
 - Add durable Tauri settings storage. Initial file-backed settings are in place.
 - Add real storage folder selection. Initial desktop folder picker and persisted session root are in place.
 - Add explicit frame-write commands for selected storage roots. Initial write and manifest commands are in place.
-- Connect miniPC frame transfer to the desktop frame-write commands. Initial one-frame transfer path is in place in the Logs tab.
+- Connect miniPC frame transfer to the desktop frame-write commands. Manual and auto-transfer paths are in place in the Settings tab and Acquisition transfer summary.
 - Add scope-agent folder watcher on the miniPC. Initial `Starrunner.Agent` scaffold is in place.
 - Detect completed FITS files from the NINA output folder. Initial stable-file detection is in place.
 - Compute checksum. Initial SHA-256 support is in place.
-- Transfer frame to the main machine.
-- Verify checksum.
-- Acknowledge receipt.
-- Keep local delivery state.
-- Show latest delivered frame and counts in the main app.
+- Transfer frame to the main machine. In place.
+- Verify checksum before and after local write. In place.
+- Acknowledge receipt only after local verification. In place.
+- Detect already-present local frames and acknowledge without duplicate writes. In place.
+- Keep local delivery state and transfer history. In place.
+- Show latest delivered frame, pending/failed counts, and transfer result type in the main app. In place.
 
 ## Phase 4: Operational Wrapper
 
-- Add miniPC health endpoint.
-- Add event stream for capture and transfer status.
+- Add miniPC health endpoint. In place through `Starrunner.Agent`.
+- Add event stream for capture and transfer status. NINA event stream is in place; transfer status is currently polled.
 - Add NINA/PHD2 process status if practical.
 - Add manual safety commands.
-- Add session manifest on the main machine.
+- Add session manifest on the main machine. In place for transferred frames.
 - Add morning report skeleton.
 
 ## Phase 5: Assisted Imaging Actions
 
-- Add `Slew And Center` command.
-- Use NINA or local tools for slew, plate solve, sync, and recenter.
-- Add autofocus trigger.
+- Add `Prepare Target` command. In place: unpark if needed, enable sidereal tracking, and ask NINA to slew/center.
+- Use NINA or local tools for slew, plate solve, sync, and recenter. Initial NINA `equipment/mount/slew?center=true` path is in place; live sky validation remains.
+- Add autofocus trigger. In place for start/cancel; not integrated into run orchestration.
 - Add guiding start/stop.
 - Add saved capture start from the active queued plan. Initial camera-only saved capture loop is in place.
-- Add sequence start from imported target.
+- Add sequence start from imported target. Partial: active queued plan can capture; full prepare/autofocus/guiding/dither orchestration is not complete.
 
 ## Phase 6: Unattended Mode
 

@@ -36,7 +36,33 @@ Current planned hardware:
 - Telescope-side computer: Windows miniPC.
 - Operator computer: more powerful Windows desktop, with possible Windows laptop use when remote.
 
-## First MVP
+## Current MVP State
+
+The original target-import and frame-transfer spine is now working in the development app.
+
+Currently working:
+
+- Stellarium target import on the main machine.
+- Local Tonight queue and active plan setup.
+- NINA status, camera cooling, autofocus command path, TPPA command path, preview exposure, and saved-FITS camera capture.
+- Prepare Target as a separate operator command: unpark if needed, enable sidereal tracking, and ask NINA to slew/center.
+- PHD2 guide graph/status through Starrunner.Agent when PHD2 event data is available.
+- Starrunner.Agent frame detection and transfer from NINA output.
+- Desktop local storage root selection, session folder naming, FITS writes, SHA-256 verification, and duplicate-safe acknowledgement.
+- FITS preview rendering, stretch controls, and FITS header inspection in Tauri.
+- Native desktop connections configured in Settings, independent of the Vite development proxy.
+- Full-resolution FITS statistics and histogram inspection.
+- Offline session review from local folders and UNC network shares, with persistent keep/reject/undecided decisions and untouched originals.
+
+Still not complete:
+
+- Full unattended sequence orchestration.
+- Automatic prepare/autofocus/guide/capture/dither flow.
+- Guiding start/stop from Straylight Studio.
+- Live-sky validation of Prepare Target and TPPA parsing.
+- Siril processing integration.
+
+## First MVP Reference
 
 The first useful milestone is intentionally narrow:
 

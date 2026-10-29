@@ -1,4 +1,5 @@
 import { frameTransferClient } from './frameTransferClient';
+import { networkFetch } from './networkClient';
 
 export type PhdGuideSample = {
   frame: number;
@@ -26,13 +27,15 @@ export type Phd2Status = {
 };
 
 async function getStatus() {
-  const response = await fetch(`${frameTransferClient.getAgentBase()}/phd2/status`);
+  const response = await networkFetch(`${frameTransferClient.getAgentBase()}/phd2/status`);
 
   if (!response.ok) {
     throw new Error(`PHD2 monitor returned HTTP ${response.status}.`);
   }
 
-  return (await response.json()) as Phd2Status;
+  const status = await response.json() as Phd2Status;
+  if (!status || !Array.isArray(status.samples)) throw new Error('PHD2 monitor returned an invalid status response.');
+  return status;
 }
 
 export const phd2Client = {

@@ -17,10 +17,11 @@ Straylight Studio keeps the main app cross-platform by avoiding Windows file sha
 
 - Runs on Windows or Linux.
 - Polls the agent for pending frames.
+- Checks whether the exact frame is already present locally.
 - Downloads frame bytes over HTTP.
 - Writes frames through Tauri `write_frame`.
 - Verifies checksum before acknowledging delivery.
-- Exposes the first transfer monitor in the Logs tab.
+- Exposes the frame transfer monitor in the Settings tab and transfer summary in Acquisition.
 - Polls Starrunner.Agent for PHD2 guiding status and graph samples.
 
 ## Default Network
@@ -85,11 +86,14 @@ Straylight Studio uses this for the Acquisition guiding graph. If PHD2 is not ru
 2. `Starrunner.Agent` waits until the file size is stable.
 3. The agent computes SHA-256 and registers the frame as `pending`.
 4. Straylight Studio calls `GET /frames/pending`.
-5. Straylight Studio downloads frame bytes from `GET /frames/{id}`.
-6. Straylight Studio writes the frame through Tauri `write_frame`.
-7. Straylight Studio compares checksums.
-8. Straylight Studio calls `POST /frames/{id}/ack`.
-9. The agent marks the frame `delivered`.
+5. Straylight Studio checks the expected local session folder for the same file name and SHA-256.
+6. If the exact local file already exists, Straylight Studio calls `POST /frames/{id}/ack` and records the history row as `Already present`.
+7. Otherwise, Straylight Studio downloads frame bytes from `GET /frames/{id}`.
+8. Straylight Studio verifies the downloaded SHA-256.
+9. Straylight Studio writes the frame through Tauri `write_frame`.
+10. Straylight Studio compares the written file checksum.
+11. Straylight Studio calls `POST /frames/{id}/ack`.
+12. The agent marks the frame `delivered`.
 
 ## NINA File Pattern
 
@@ -206,4 +210,21 @@ cd C:\Astro\tools\starrunner-agent
 powershell -ExecutionPolicy Bypass -File .\drop-fake-fits.ps1 -OutputRoot "C:\Astro\nina-output"
 ```
 
-The Straylight Studio Logs tab can use `Check Agent` to poll `/health`, `/frames/pending`, and `/frames/failed`. `Transfer One` downloads the first pending frame, writes it through Tauri storage, verifies SHA-256, and acknowledges the frame. `Transfer All` drains the visible pending queue. `Auto transfer new frames` polls the agent every few seconds and drains pending frames as they arrive. Failed frames stay visible until retried.
+The Straylight Studio Settings tab can use `Check Agent` to poll `/health`, `/frames/pending`, and `/frames/failed`. `Transfer One` transfers or acknowledges the first pending frame. `Transfer All` drains the visible pending queue. `Auto transfer new frames` polls the agent every few seconds and drains pending frames as they arrive. Failed frames stay visible until retried.
+
+Transfer history distinguishes:
+
+- `Transferred`: downloaded, written locally, checksum verified, then acknowledged.
+- `Already present`: exact local file and checksum already existed, so the app acknowledged without another write.
+
+## Protected Desktop Writes
+
+The desktop backend now receives the expected size and SHA-256 from the agent, not just the downloaded bytes. It stages and flushes a temporary file, verifies it by reading it back, and publishes it without replacing an existing image. It reads the destination again and commits the manifest before returning a verified result for acknowledgement.
+
+- Same filename and same contents: reuse the verified image.
+- Same filename and different contents: report a collision; keep both the original local file and pending agent copy. The batch stops at the error. Resolve the conflicting destination before retrying; it is never silently overwritten or automatically deleted.
+- Image saved but manifest commit interrupted: retry verifies the existing image and repairs its manifest entry before acknowledging.
+- Failed write, bad checksum/size, or failed manifest commit: no acknowledgement; the agent retains the pending frame.
+- Abandoned `.partial` staging files: ignored on retry. No incomplete image is published under its final FITS name.
+
+The current atomic no-replace publication uses hard links and requires filesystem support (NTFS/ext4, not FAT/exFAT). Manifests are updated with a staged rename. This protects normal interruption/retry paths; power-loss durability still depends on the filesystem and storage hardware. Use one Straylight Studio instance per destination session.

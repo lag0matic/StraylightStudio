@@ -59,6 +59,8 @@ The current packaging goal is local use, not public distribution. Code signing, 
 
 ## Linux Build Notes
 
+Packaged desktop connections no longer depend on the Vite proxy. Configure NINA and Stellarium under Settings > Connections and the agent under Frame Transfer. The default deployment remains NINA/PHD2/ASTAP/agent on Starrunner, with Straylight Studio and Stellarium on the operator computer.
+
 Linux builds should use the same app source and runtime config. Build from a Linux machine with the Tauri Linux prerequisites installed:
 
 ```bash
@@ -79,10 +81,16 @@ Before calling a local build usable:
 - `npm run agent:test-metadata` passes when agent changes are included.
 - `npm run desktop:build` creates a release executable or installer.
 - The app launches outside Vite dev mode.
-- Logs tab shows the expected NINA URL, event WebSocket URL, TPPA WebSocket URL, and frame-agent URL.
+- Diagnostics and Settings show the expected NINA URL, event WebSocket URL, TPPA WebSocket URL, and frame-agent URL.
 - A writable image destination can be selected and survives app restart.
 - Demo mode can be toggled without hardware.
 - Hardware actions still require explicit confirmation where appropriate.
+
+## Offline Standalone Check
+
+`npm run test:standalone-network` builds and launches a Windows bundled debug executable against local HTTP/WebSocket fixtures. It starts no Vite server and uses a separate `com.straylightastro.networktest` settings identity. It verifies native HTTP, equipment and guiding reads, Stellarium import, binary bodies, timeouts, non-followed redirects, event reconnection without command replay, TPPA bidirectional channels, address validation/persistence, and layout at 1920x1080 and 3440x1440. It does not validate actual telescope behavior or Linux packaging.
+
+An existing Playwright installation is needed. Set `PLAYWRIGHT_MODULE` to its module URL when outside the project. The harness uses Playwright's bundled WebSocket test server without adding an npm dependency. It attaches to its own WebView2 debugging port, closes its test process, and rebuilds the normal desktop executable on exit. Screenshots and the isolated test WebView data are under ignored `tmp/standalone-network`. The test profile contains only localhost fixture addresses; normal user settings are untouched.
 
 ## Not Yet Solved
 

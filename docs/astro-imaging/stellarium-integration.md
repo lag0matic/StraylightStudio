@@ -103,17 +103,19 @@ Useful optional fields:
 }
 ```
 
-## MVP Behavior
+## Current Behavior
 
-The first Stellarium milestone should only prove the data path:
+The Stellarium path now proves the data path and feeds the current planning workflow:
 
 1. User selects a target in Stellarium.
 2. User clicks `Import From Stellarium` in the imaging app.
 3. Imaging app reads `GET /api/objects/info?format=map` through the local Stellarium Remote Control server.
 4. Imaging app displays the imported target.
 5. Imaging app shows a survey preview and frame overlay for the RedCat 51 / ASI183MC Pro field of view.
+6. User can add the imported target to Tonight and use it as the active Acquisition target.
+7. User can run Prepare Target from Acquisition, which asks NINA to unpark if needed, enable sidereal tracking, and slew/center.
 
-No hardware should move during the first proof-of-concept.
+Importing from Stellarium alone does not move hardware. Prepare Target is the separate hardware-moving action and asks for confirmation.
 
 NINA can show framing and rotation after plate solving. Without a rotator, this app should initially treat rotation as a manually entered planning value. Later, after capture/plate-solve events are wired into the acquisition flow, the app can update the current rotation from solved image metadata.
 
@@ -122,8 +124,7 @@ NINA can show framing and rotation after plate solving. Without a rotator, this 
 After the import path is stable:
 
 - Add target altitude and transit checks.
-- Add framing previews.
+- Refine framing previews and rotation feedback from solved images.
 - Add sequence templates.
-- Add `Slew And Center`.
-- Add `Run Now`.
+- Decide whether Start Run should optionally call Prepare Target automatically.
 - Add a target queue for unattended sessions.

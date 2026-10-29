@@ -1,3 +1,5 @@
+import { networkFetch } from './networkClient';
+
 export type AgentHealth = {
   name: string;
   status: string;
@@ -22,6 +24,13 @@ export type AgentFrame = {
   error?: string | null;
 };
 
+type AgentFrameCollection = AgentFrame[] | {
+  value?: AgentFrame[];
+  Value?: AgentFrame[];
+  count?: number;
+  Count?: number;
+};
+
 export const defaultFrameAgentBase = import.meta.env.VITE_FRAME_AGENT_BASE || 'http://Starrunner.local:4787';
 
 let activeAgentBase = normalizeAgentBase(defaultFrameAgentBase);
@@ -39,14 +48,7 @@ function getAgentBase() {
 }
 
 async function fetchWithTimeout(url: string, timeoutMs = 8000) {
-  const controller = new AbortController();
-  const timeout = window.setTimeout(() => controller.abort(), timeoutMs);
-
-  try {
-    return await fetch(url, { signal: controller.signal });
-  } finally {
-    window.clearTimeout(timeout);
-  }
+  return networkFetch(url, timeoutMs);
 }
 
 async function getJson<T>(path: string, timeoutMs = 8000) {
@@ -60,37 +62,33 @@ async function getJson<T>(path: string, timeoutMs = 8000) {
 }
 
 async function postJson<T>(path: string, body: unknown, timeoutMs = 8000) {
-  const controller = new AbortController();
-  const timeout = window.setTimeout(() => controller.abort(), timeoutMs);
-
-  try {
-    const response = await fetch(`${activeAgentBase}${path}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-      signal: controller.signal
-    });
+    const response = await networkFetch(`${activeAgentBase}${path}`, timeoutMs, { method: 'POST', body: JSON.stringify(body) });
 
     if (!response.ok) {
       throw new Error(`Frame agent returned HTTP ${response.status}.`);
     }
 
     return (await response.json()) as T;
-  } finally {
-    window.clearTimeout(timeout);
-  }
 }
 
 async function getHealth() {
   return getJson<AgentHealth>('/health');
 }
 
+function normalizeFrameCollection(response: AgentFrameCollection) {
+  if (Array.isArray(response)) {
+    return response;
+  }
+
+  return response.value ?? response.Value ?? [];
+}
+
 async function getPendingFrames() {
-  return getJson<AgentFrame[]>('/frames/pending');
+  return normalizeFrameCollection(await getJson<AgentFrameCollection>('/frames/pending'));
 }
 
 async function getFailedFrames() {
-  return getJson<AgentFrame[]>('/frames/failed');
+  return normalizeFrameCollection(await getJson<AgentFrameCollection>('/frames/failed'));
 }
 
 async function downloadFrame(frameId: string) {
