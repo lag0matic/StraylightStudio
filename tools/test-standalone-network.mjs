@@ -44,6 +44,7 @@ const server = createServer((req, res) => {
   if (pathname === '/slow') { setTimeout(() => res.end('{}'), 500); return; }
   let value = envelope('test');
   if (pathname.endsWith('/equipment/info')) value = envelope(equipment);
+  if (pathname.endsWith('/sequence/json')) value = envelope([{ GlobalTriggers: [] }, ...['Start','Targets','End'].map((name) => ({ Name: `${name}_Container`, Status: 'CREATED', Items: [] }))]);
   if (pathname.endsWith('/equipment/camera/info')) value = envelope(equipment.Camera);
   if (pathname.endsWith('/equipment/mount/info')) value = envelope(equipment.Mount);
   if (pathname.endsWith('/equipment/focuser/info')) value = envelope(equipment.Focuser);

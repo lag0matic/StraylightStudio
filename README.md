@@ -20,12 +20,13 @@ The goal is to keep the heavy, flaky hardware stack close to the telescope while
 - Full-resolution FITS statistics and a histogram, cached independently of display stretch.
 - Offline session review from local folders or network shares: thumbnails, frame navigation, metadata comparison, and persistent keep/reject/undecided decisions. Original images remain untouched.
 - Acquisition cancellation guards and automatic transfer that continue across tab navigation, with staged, verified local image writes.
+- NINA-owned execution of the active target's full sequence, with preparation, optional autofocus/guiding/dithering, persisted run ownership, and reconnection without replaying start commands.
 
 ## Current Limits
 
-- Start Run is still a camera saved-capture loop, not a full unattended sequence engine.
-- Prepare Target is separate from Start Run and still needs real-sky validation.
-- Guiding start/stop, autofocus-before-run orchestration, dithering, meridian behavior, and Siril processing are not finished.
+- Full sequence runs the active target in NINA; Camera only is the diagnostic capture loop. Native meridian flips are opt-in, use the NINA profile, and passed load/readback checks only. End-only mount actions and completion/cancellation warming passed indoor checks. Actual flips, automatic failure recovery, active-guide stopping, and full light execution still need supervised validation. Multi-target execution is not implemented.
+- The manual Prepare Target command and generated NINA light sequences still need real-sky validation.
+- Generated light sequences still need real-sky validation of autofocus, guiding, dithering, and centering. Siril processing is not finished.
 - Windows desktop behavior has been tested; Linux builds and packaging remain unverified.
 - This is still development software; hardware-moving actions require attention and physical clearance.
 

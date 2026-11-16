@@ -1,5 +1,19 @@
 use super::*;
 
+#[test]
+fn settings_are_replaced_as_complete_json_and_failed_publication_is_reported() {
+    let directory = TestFolder::new();
+    let path = directory.0.join("settings.json");
+    write_settings(&path, &json!({"plan":"old", "run":null})).unwrap();
+    write_settings(&path, &json!({"plan":"new", "run":{"id":"test-run"}})).unwrap();
+    assert_eq!(read_settings(&path).unwrap(), json!({"plan":"new", "run":{"id":"test-run"}}));
+    let invalid = directory.0.join("directory");
+    fs::create_dir(&invalid).unwrap();
+    assert!(write_settings(&invalid, &json!({"run":"cannot publish"})).is_err());
+    assert_eq!(read_settings(&path).unwrap()["plan"], "new");
+    assert!(!fs::read_dir(&directory.0).unwrap().any(|entry| entry.unwrap().file_name().to_string_lossy().ends_with(".partial")));
+}
+
 struct TestFolder(PathBuf);
 
 impl TestFolder {

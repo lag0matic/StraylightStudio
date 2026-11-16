@@ -207,7 +207,14 @@ fn merge_settings(existing: &mut Value, update: Value) -> Result<(), String> {
 
 fn write_settings(path: &PathBuf, settings: &Value) -> Result<(), String> {
     let body = serde_json::to_string_pretty(settings).map_err(|error| error.to_string())?;
-    fs::write(path, format!("{body}\n")).map_err(|error| error.to_string())
+    let directory = path.parent().ok_or("Settings path has no parent")?;
+    let (temporary, mut file) = TemporaryFile::create(directory)?;
+    file.write_all(body.as_bytes()).map_err(|error| error.to_string())?;
+    file.sync_all().map_err(|error| error.to_string())?;
+    drop(file);
+    verify_file(&temporary.0, &sha256_hex(body.as_bytes()), body.len() as u64)?;
+    fs::rename(&temporary.0, path).map_err(|error| format!("Could not save settings: {error}"))?;
+    sync_directory(directory)
 }
 
 fn settings_string(settings: &Value, key: &str) -> Option<String> {

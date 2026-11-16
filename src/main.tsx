@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
+import { useCallback, useEffect, useId, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import type { ChangeEvent, Dispatch, DragEvent, ReactNode, SetStateAction } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import {
@@ -32,6 +32,12 @@ import { storageClient } from './clients/storageClient';
 import type { FitsAnalysis } from './clients/storageClient';
 import { FitsHistogram, analysisNumber } from './FitsHistogram';
 import { SessionReview } from './SessionReview';
+import { createNinaSequenceRunner, prepareNinaMeridianFlip, readNinaMeridianProfile } from './clients/ninaSequenceClient';
+import { flipStatusText } from './ninaMeridianFlip';
+import type { MeridianFlipProfile } from './ninaMeridianFlip';
+import { buildNinaSequence } from './ninaSequencePlan';
+import { cleanupConfirmation, cleanupLabels, normalizeCleanupPolicy } from './ninaCleanup';
+import type { CleanupPolicy } from './ninaCleanup';
 import { tauriClient } from './clients/tauriClient';
 import { OperationGate } from './operationGate';
 import { connectionClient, defaultConnections, normalizeServerAddress } from './clients/connectionClient';
@@ -142,6 +148,7 @@ type DiagnosticResult = {
 };
 
 type AcquisitionWorkspaceState = {
+  runMode: 'nina' | 'camera';
   monitorTab: AcquisitionMonitorTab;
   collapsedPanels: Record<AcquisitionPanelKey, boolean>;
   stretch: StretchSettings;
@@ -167,6 +174,8 @@ type AppSettings = {
   autoRenderFitsOnArrival: boolean;
   previewRenderSize: PreviewRenderSize;
   agentBase: string;
+  cleanupPolicy: CleanupPolicy;
+  meridianFlipEnabled: boolean;
 };
 
 type CapabilityProbe = {
@@ -185,6 +194,7 @@ type CapabilityResult = DiagnosticResult & {
 type TransferHistoryItem = {
   id: string;
   transferredAt: string;
+  transferredAtIso?: string;
   targetName: string;
   imageType: string;
   sourceKind: string;
@@ -206,6 +216,7 @@ type AcquisitionPipelineState = {
 };
 
 type TabKey = 'setup' | 'targeting' | 'acquisition' | 'review' | 'settings' | 'diagnostics';
+type SettingsSection = 'connections' | 'run' | 'preview';
 type ConnectionStatus = 'checking' | 'online' | 'offline' | 'demo';
 
 type ImportedTarget = {
@@ -477,6 +488,7 @@ const defaultCollapsedPanels: Record<AcquisitionPanelKey, boolean> = {
 };
 
 const defaultAcquisitionWorkspace: AcquisitionWorkspaceState = {
+  runMode: 'nina',
   monitorTab: 'stats',
   collapsedPanels: defaultCollapsedPanels,
   stretch: defaultStretch,
@@ -494,7 +506,9 @@ const defaultAppSettings: AppSettings = {
   autoLoadLatestFrame: true,
   autoRenderFitsOnArrival: true,
   previewRenderSize: 'balanced',
-  agentBase: frameTransferClient.defaultAgentBase
+  agentBase: frameTransferClient.defaultAgentBase,
+  cleanupPolicy: normalizeCleanupPolicy(),
+  meridianFlipEnabled: false
 };
 
 const defaultSequenceRun: SequenceRunState = {
@@ -539,6 +553,8 @@ function loadAppSettings(overrides?: Partial<AppSettings>): AppSettings {
   const merged = { ...stored, ...overrides };
 
   return {
+    cleanupPolicy: normalizeCleanupPolicy(merged.cleanupPolicy),
+    meridianFlipEnabled: merged.meridianFlipEnabled === true,
     ninaOrigin: typeof merged.ninaOrigin === 'string' ? merged.ninaOrigin : defaultConnections.ninaOrigin,
     stellariumOrigin: typeof merged.stellariumOrigin === 'string' ? merged.stellariumOrigin : defaultConnections.stellariumOrigin,
     autoTransferEnabled: typeof merged.autoTransferEnabled === 'boolean'
@@ -1384,6 +1400,7 @@ function loadAcquisitionWorkspaceState(): AcquisitionWorkspaceState {
     : {};
 
   return {
+    runMode: stored.runMode === 'camera' ? 'camera' : 'nina',
     monitorTab: isAcquisitionMonitorTab(stored.monitorTab) ? stored.monitorTab : defaultAcquisitionWorkspace.monitorTab,
     collapsedPanels: {
       guiding: storedCollapsed.guiding === true,
@@ -1867,7 +1884,7 @@ function StatusBar({
         <StatusLight label="Tracking" active={mount?.TrackingEnabled} />
         <StatusLight label="Focuser" active={focuser?.Connected} />
         <StatusLight label="Guiding" active={guider?.Connected} />
-        <div className={socketStatus === 'open' ? 'connection online' : 'connection offline'}>Events {socketStatus}</div>
+        <div className={demoMode ? 'connection wait' : socketStatus === 'open' ? 'connection online' : 'connection offline'}>{demoMode ? 'Demo events' : `Events ${socketStatus}`}</div>
         <div className="last-refresh">{lastRefresh || '-'}</div>
         <button className={demoMode ? 'demo-toggle active' : 'demo-toggle'} type="button" onClick={onToggleDemo}>
           Demo Data
@@ -1901,7 +1918,7 @@ function Panel({
   icon,
   children,
   className = '',
-  collapsible = false,
+  collapsible = true,
   collapsed = false,
   onToggle
 }: {
@@ -1913,25 +1930,33 @@ function Panel({
   collapsed?: boolean;
   onToggle?: () => void;
 }) {
+  const contentId = useId();
+  const [localCollapsed, setLocalCollapsed] = useState(() => settingsClient.loadBoolean(`straylight-panel-${title}`, false));
+  const isCollapsed = collapsible && (onToggle ? collapsed : localCollapsed);
+  const toggle = () => {
+    if (onToggle) onToggle();
+    else { const next = !localCollapsed; setLocalCollapsed(next); settingsClient.saveBoolean(`straylight-panel-${title}`, next); }
+  };
   return (
-    <section className={`${className ? `panel ${className}` : 'panel'}${collapsed ? ' collapsed' : ''}`}>
+    <section className={`${className ? `panel ${className}` : 'panel'}${isCollapsed ? ' collapsed' : ''}`}>
       <div className="panel-header">
-        <h2>{title}</h2>
+        <h2>{icon}{title}</h2>
         <div className="panel-header-actions">
-          {icon}
           {collapsible ? (
             <button
-              aria-label={collapsed ? `Expand ${title}` : `Collapse ${title}`}
+              aria-label={isCollapsed ? `Expand ${title}` : `Collapse ${title}`}
+              aria-expanded={!isCollapsed}
+              aria-controls={contentId}
               className="panel-collapse-button"
               type="button"
-              onClick={onToggle}
+              onClick={toggle}
             >
-              {collapsed ? <ChevronRight size={16} /> : <ChevronDown size={16} />}
+              {isCollapsed ? <ChevronRight size={16} /> : <ChevronDown size={16} />}
             </button>
           ) : null}
         </div>
       </div>
-      {collapsed ? null : children}
+      <div id={contentId} className="panel-content" hidden={isCollapsed}>{children}</div>
     </section>
   );
 }
@@ -1979,23 +2004,10 @@ function SetupTab({
   const guider = equipment?.Guider;
 
   return (
-    <div className="tab-grid">
-      <Panel title="Camera and Cooling" icon={<Camera size={17} />}>
-        <DataTable
-          rows={[
-            ['Device', camera?.DisplayName || camera?.Name],
-            ['State', camera?.CameraState],
-            ['Temperature', formatTemp(camera?.Temperature)],
-            ['Target temp', formatTemp(camera?.TemperatureSetPoint ?? camera?.TargetTemp)],
-            ['Can set temp', camera?.CanSetTemperature],
-            ['Cooler', camera?.CoolerOn],
-            ['Cooler power', camera?.CoolerPower === undefined ? undefined : `${camera.CoolerPower.toFixed(1)}%`],
-            ['Gain', camera?.Gain],
-            ['Offset', camera?.Offset],
-            ['Sensor', camera?.XSize && camera?.YSize ? `${camera.XSize} x ${camera.YSize}` : undefined],
-            ['Pixel size', camera?.PixelSize ? `${camera.PixelSize} um` : undefined]
-          ]}
-        />
+    <div className="setup-workspace">
+      <div className="setup-equipment">
+      <Panel title="Camera and Cooling" icon={<Camera size={17} />} className="setup-camera">
+        <div className="equipment-summary"><strong>{camera?.DisplayName || camera?.Name || 'Camera disconnected'}</strong><span>{camera?.CameraState || 'Unavailable'}</span><span>{formatTemp(camera?.Temperature)} / {formatTemp(camera?.TemperatureSetPoint ?? camera?.TargetTemp)}</span><span>Cooler {camera?.CoolerOn ? `${camera.CoolerPower?.toFixed(0) ?? '-'}%` : 'off'}</span></div>
         <div className="form-grid">
           <label>
             Target temp
@@ -2040,75 +2052,68 @@ function SetupTab({
           </button>
           <div className="inline-note">Use -1 minutes for NINA profile default.</div>
         </div>
+        <details className="section-details"><summary>Camera details</summary><DataTable rows={[
+          ['State', camera?.CameraState], ['Gain', camera?.Gain], ['Offset', camera?.Offset],
+          ['Sensor', camera?.XSize && camera?.YSize ? `${camera.XSize} x ${camera.YSize}` : undefined],
+          ['Pixel size', camera?.PixelSize ? `${camera.PixelSize} um` : undefined], ['Temperature control', camera?.CanSetTemperature]
+        ]} /></details>
       </Panel>
-
-      <Panel title="Focus" icon={<Focus size={17} />}>
-        <div className="focus-panel">
-          <div className="focus-strip">
-            <div className={autofocusStateClass(commandBusy, focuser, lastAutofocus, lastAutofocusError)}>
-              <span>Autofocus</span>
-              <strong>{autofocusStateText(commandBusy, focuser, lastAutofocus, lastAutofocusError)}</strong>
-            </div>
-            <div>
-              <span>Focuser</span>
-              <strong>{focuser?.DisplayName || focuser?.Name || '-'}</strong>
-            </div>
-            <div>
-              <span>Position</span>
-              <strong>{formatValue(focuser?.Position)}</strong>
-            </div>
-            <div>
-              <span>Temperature</span>
-              <strong>{formatValue(focuser?.Temperature)}</strong>
-            </div>
+      <Panel title="Mount and Guide" icon={<Telescope size={17} />} className="setup-mount">
+        <div className="mount-status-row">
+          <div>
+            <span>Tracking</span>
+            <strong>{mount?.TrackingEnabled ? mount.TrackingMode || 'Enabled' : mount?.Connected ? 'Off' : 'Unavailable'}</strong>
           </div>
-
-          <div className="focus-result-grid">
-            <div>
-              <span>Calculated</span>
-              <strong>{formatValue(lastAutofocus?.CalculatedFocusPoint)}</strong>
-            </div>
-            <div>
-              <span>Previous</span>
-              <strong>{formatValue(lastAutofocus?.PreviousFocusPoint)}</strong>
-            </div>
-            <div>
-              <span>Initial</span>
-              <strong>{formatValue(lastAutofocus?.InitialFocusPoint)}</strong>
-            </div>
-            <div>
-              <span>Method</span>
-              <strong>{lastAutofocus?.Method || lastAutofocus?.AutoFocuserName || '-'}</strong>
-            </div>
+          <div>
+            <span>Slewing</span>
+            <strong>{mount?.Connected ? mount.Slewing ? 'Yes' : 'No' : 'Unavailable'}</strong>
           </div>
-
-          {lastAutofocusError ? <div className="focus-message error">{lastAutofocusError}</div> : null}
-          {lastAutofocus?.Duration ? <div className="focus-message">Last autofocus duration: {lastAutofocus.Duration}</div> : null}
-
-          <div className="button-row focus-command-row">
-            <button
-              className={commandBusy === 'start-af' ? 'focus-button active' : 'focus-button'}
-              type="button"
-              disabled={!focuser?.Connected || commandBusy !== ''}
-              onClick={() => void runAutofocus(false)}
-            >
-              <Focus size={16} />
-              {commandBusy === 'start-af' ? 'AF Running' : 'Start AF'}
-            </button>
-            <button
-              className={commandBusy === 'cancel-af' ? 'capture-button active' : 'capture-button'}
-              type="button"
-              disabled={commandBusy !== '' && commandBusy !== 'start-af'}
-              onClick={() => void runAutofocus(true)}
-            >
-              <CircleStop size={16} />
-              {commandBusy === 'cancel-af' ? 'Canceling AF' : 'Cancel AF'}
-            </button>
+          <div>
+            <span>Park</span>
+            <strong>{mount?.Connected ? mount.AtPark ? 'Parked' : 'Unparked' : 'Unavailable'}</strong>
           </div>
         </div>
+        <div className="button-row">
+          <button
+            className={mount?.TrackingEnabled && mount?.TrackingMode === 'Sidereal' ? 'tracking-button active' : 'tracking-button'}
+            type="button"
+            disabled={!mount?.Connected || mount?.AtPark || mount?.CanSetTrackingEnabled === false || commandBusy !== ''}
+            onClick={() => void runMountTracking(0)}
+          >
+            Sidereal Tracking
+          </button>
+          <button
+            className={!mount?.TrackingEnabled || mount?.TrackingMode === 'Stopped' ? 'tracking-stop-button active' : 'tracking-stop-button'}
+            type="button"
+            disabled={!mount?.Connected || mount?.AtPark || mount?.CanSetTrackingEnabled === false || commandBusy !== ''}
+            onClick={() => void runMountTracking(4)}
+          >
+            Stop Tracking
+          </button>
+        </div>
+        <details className="section-details"><summary>Mount and guider details</summary><DataTable
+          rows={[
+            ['Mount', mount?.DisplayName || mount?.Name],
+            ['Connected', mount?.Connected],
+            ['Slewing', mount?.Slewing],
+            ['Parked', mount?.AtPark],
+            ['RA', mount?.RightAscensionString],
+            ['Dec', mount?.DeclinationString],
+            ['Altitude', mount?.AltitudeString],
+            ['Azimuth', mount?.AzimuthString],
+            ['Tracking', mount?.TrackingEnabled],
+            ['Tracking mode', mount?.TrackingMode],
+            ['Can set tracking', mount?.CanSetTrackingEnabled],
+            ['Supported modes', mount?.TrackingModes?.join(', ')],
+            ['Pier side', mount?.SideOfPier],
+            ['Flip window', mount?.TimeToMeridianFlipString],
+            ['Guider pixel scale', guider?.PixelScale]
+          ]}
+        /></details>
       </Panel>
-
-      <Panel title="Three Point Polar Alignment" icon={<Crosshair size={17} />}>
+      </div>
+      <div className="setup-alignment-focus">
+      <Panel title="Three Point Polar Alignment" icon={<Crosshair size={17} />} className="setup-alignment">
         <div className="tppa-panel">
           <div className="tppa-status-strip">
             <div className={tppaStatusClass(tppaWorkflow)}>
@@ -2152,7 +2157,7 @@ function SetupTab({
             <span>{tppaWorkflow.instruction || 'Waiting for NINA TPPA adjustment instructions.'}</span>
           </div>
 
-          <div className="tppa-settings-grid">
+          <details className="section-details"><summary>Alignment capture settings</summary><div className="tppa-settings-grid">
             <label>
               Exposure
               <input value={tppaSettings.exposureTime} type="number" min="0.1" step="0.1" onChange={(event) => setTppaNumber('exposureTime', event.target.value)} />
@@ -2188,7 +2193,7 @@ function SetupTab({
                 <option value="west">West</option>
               </select>
             </label>
-          </div>
+          </div></details>
 
           <div className="tppa-toggle-row">
             <label>
@@ -2220,7 +2225,7 @@ function SetupTab({
           </div>
 
           {tppaWorkflow.rawEvents.length ? (
-            <div className="tppa-event-list">
+            <details className="section-details"><summary>Recent alignment events</summary><div className="tppa-event-list">
               {tppaWorkflow.rawEvents.slice(0, 5).map((event) => (
                 <div className="tppa-event-row" key={event.id}>
                   <time>{event.receivedAt}</time>
@@ -2228,64 +2233,76 @@ function SetupTab({
                   <span>{event.detail}</span>
                 </div>
               ))}
-            </div>
+            </div></details>
           ) : null}
         </div>
       </Panel>
+      <Panel title="Focus" icon={<Focus size={17} />} className="setup-focus">
+        <div className="focus-panel">
+          <div className="focus-strip">
+            <div className={autofocusStateClass(commandBusy, focuser, lastAutofocus, lastAutofocusError)}>
+              <span>Autofocus</span>
+              <strong>{autofocusStateText(commandBusy, focuser, lastAutofocus, lastAutofocusError)}</strong>
+            </div>
+            <div>
+              <span>Focuser</span>
+              <strong>{focuser?.DisplayName || focuser?.Name || '-'}</strong>
+            </div>
+            <div>
+              <span>Position</span>
+              <strong>{formatValue(focuser?.Position)}</strong>
+            </div>
+            <div>
+              <span>Temperature</span>
+              <strong>{formatValue(focuser?.Temperature)}</strong>
+            </div>
+          </div>
 
-      <Panel title="Mount and Guide" icon={<Telescope size={17} />}>
-        <div className="mount-status-row">
-          <div>
-            <span>Tracking</span>
-            <strong>{mount?.TrackingEnabled ? mount.TrackingMode || 'Enabled' : mount?.Connected ? 'Off' : 'Unavailable'}</strong>
-          </div>
-          <div>
-            <span>Slewing</span>
-            <strong>{mount?.Slewing ? 'Yes' : 'No'}</strong>
-          </div>
-          <div>
-            <span>Park</span>
-            <strong>{mount?.AtPark ? 'Parked' : 'Clear'}</strong>
+          <details className="section-details"><summary>Last autofocus result</summary><div className="focus-result-grid">
+            <div>
+              <span>Calculated</span>
+              <strong>{formatValue(lastAutofocus?.CalculatedFocusPoint)}</strong>
+            </div>
+            <div>
+              <span>Previous</span>
+              <strong>{formatValue(lastAutofocus?.PreviousFocusPoint)}</strong>
+            </div>
+            <div>
+              <span>Initial</span>
+              <strong>{formatValue(lastAutofocus?.InitialFocusPoint)}</strong>
+            </div>
+            <div>
+              <span>Method</span>
+              <strong>{lastAutofocus?.Method || lastAutofocus?.AutoFocuserName || '-'}</strong>
+            </div>
+          </div></details>
+
+          {lastAutofocusError ? <div className="focus-message error">{lastAutofocusError}</div> : null}
+          {lastAutofocus?.Duration ? <div className="focus-message">Last autofocus duration: {lastAutofocus.Duration}</div> : null}
+
+          <div className="button-row focus-command-row">
+            <button
+              className={commandBusy === 'start-af' ? 'focus-button active' : 'focus-button'}
+              type="button"
+              disabled={!focuser?.Connected || commandBusy !== ''}
+              onClick={() => void runAutofocus(false)}
+            >
+              <Focus size={16} />
+              {commandBusy === 'start-af' ? 'AF Running' : 'Start AF'}
+            </button>
+            <button
+              className={commandBusy === 'cancel-af' ? 'capture-button active' : 'capture-button'}
+              type="button"
+              disabled={commandBusy !== '' && commandBusy !== 'start-af'}
+              onClick={() => void runAutofocus(true)}
+            >
+              <CircleStop size={16} />
+              {commandBusy === 'cancel-af' ? 'Canceling AF' : 'Cancel AF'}
+            </button>
           </div>
         </div>
-        <div className="button-row">
-          <button
-            className={mount?.TrackingEnabled && mount?.TrackingMode === 'Sidereal' ? 'tracking-button active' : 'tracking-button'}
-            type="button"
-            disabled={!mount?.Connected || mount?.AtPark || mount?.CanSetTrackingEnabled === false || commandBusy !== ''}
-            onClick={() => void runMountTracking(0)}
-          >
-            Sidereal Tracking
-          </button>
-          <button
-            className={!mount?.TrackingEnabled || mount?.TrackingMode === 'Stopped' ? 'tracking-stop-button active' : 'tracking-stop-button'}
-            type="button"
-            disabled={!mount?.Connected || mount?.AtPark || mount?.CanSetTrackingEnabled === false || commandBusy !== ''}
-            onClick={() => void runMountTracking(4)}
-          >
-            Stop Tracking
-          </button>
-        </div>
-        <DataTable
-          rows={[
-            ['Mount', mount?.DisplayName || mount?.Name],
-            ['Connected', mount?.Connected],
-            ['Slewing', mount?.Slewing],
-            ['Parked', mount?.AtPark],
-            ['RA', mount?.RightAscensionString],
-            ['Dec', mount?.DeclinationString],
-            ['Altitude', mount?.AltitudeString],
-            ['Azimuth', mount?.AzimuthString],
-            ['Tracking', mount?.TrackingEnabled],
-            ['Tracking mode', mount?.TrackingMode],
-            ['Can set tracking', mount?.CanSetTrackingEnabled],
-            ['Supported modes', mount?.TrackingModes?.join(', ')],
-            ['Pier side', mount?.SideOfPier],
-            ['Flip window', mount?.TimeToMeridianFlipString],
-            ['Guider pixel scale', guider?.PixelScale]
-          ]}
-        />
       </Panel>
+      </div>
     </div>
   );
 }
@@ -2330,23 +2347,18 @@ function TargetingTab({
   onClearQueue: () => void;
 }) {
   const imageUrl = target ? surveyImageUrl(target) : '';
+  const [loadedSurvey, setLoadedSurvey] = useState('');
+  const [failedSurvey, setFailedSurvey] = useState('');
   const overlayWidth = `${(redcatFrame.widthDegrees / redcatFrame.previewFovDegrees) * 100}%`;
   const overlayHeight = `${(redcatFrame.heightDegrees / redcatFrame.previewFovDegrees) * 100}%`;
   const totalIntegration = integrationSeconds(sequencePlan);
   const estimatedDuration = totalIntegration + (sequencePlan.autofocusBeforeRun ? 180 : 0) + (sequencePlan.guidingRequired ? 90 : 0);
 
   return (
-    <div className="tab-grid">
-      <Panel title="Stellarium Import" icon={<Search size={17} />}>
-        <DataTable
-          rows={[
-            ['Remote Control', connectionClient.getSnapshot().stellariumOrigin],
-            ['Selection', target?.name],
-            ['Source', target?.source],
-            ['Imported', target?.importedAt],
-            ['Status', targetError || (target ? 'Ready' : 'No target imported')]
-          ]}
-        />
+    <div className="targeting-workspace">
+      <div className="targeting-column">
+      <Panel title="Target Selection" icon={<Crosshair size={17} />}>
+        <div className="equipment-summary"><strong>{target?.name || 'No target selected'}</strong><span>{target?.raText || (target?.raDegrees === undefined ? '-' : `${target.raDegrees.toFixed(4)} deg`)} / {target?.decText || (target?.decDegrees === undefined ? '-' : `${target.decDegrees.toFixed(4)} deg`)}</span></div>
         <div className="button-row">
           <button type="button" disabled={targetBusy} onClick={() => void onImport()}>
             <Send size={16} />
@@ -2357,9 +2369,8 @@ function TargetingTab({
             Demo M31
           </button>
         </div>
-      </Panel>
-
-      <Panel title="Target" icon={<Crosshair size={17} />}>
+        {targetError ? <div className="focus-message error" role="alert">{targetError}</div> : null}
+        <details className="section-details"><summary>Target and source details</summary>
         <DataTable
           rows={[
             ['Name', target?.name],
@@ -2373,6 +2384,32 @@ function TargetingTab({
             ['Frame', `${redcatFrame.widthDegrees.toFixed(2)}° x ${redcatFrame.heightDegrees.toFixed(2)}°`]
           ]}
         />
+        <DataTable
+          rows={[
+            ['Remote Control', connectionClient.getSnapshot().stellariumOrigin],
+            ['Selection', target?.name],
+            ['Source', target?.source],
+            ['Imported', target?.importedAt],
+            ['Status', targetError || (target ? 'Ready' : 'No target imported')]
+          ]}
+        />
+        </details>
+      </Panel>
+      <Panel title="Frame Preview" icon={<Aperture size={17} />}>
+        <div className="target-preview">
+          {imageUrl && failedSurvey !== imageUrl ? <img key={imageUrl} alt={`${target?.name} survey preview`} src={imageUrl} style={{ opacity: loadedSurvey === imageUrl ? 1 : 0 }} onLoad={() => setLoadedSurvey(imageUrl)} onError={() => setFailedSurvey(imageUrl)} /> : null}
+          {loadedSurvey !== imageUrl || !imageUrl || failedSurvey === imageUrl ? <div className="survey-status">{failedSurvey === imageUrl && imageUrl ? 'Survey image unavailable' : imageUrl ? 'Loading survey...' : 'No survey preview'}</div> : null}
+          {target && loadedSurvey === imageUrl && failedSurvey !== imageUrl ? (
+            <div
+              className="frame-overlay"
+              style={{
+                width: overlayWidth,
+                height: overlayHeight,
+                transform: `translate(-50%, -50%) rotate(${target.rotationDegrees}deg)`
+              }}
+            />
+          ) : null}
+        </div>
         <div className="form-grid single">
           <label>
             Rotation
@@ -2388,23 +2425,8 @@ function TargetingTab({
           </label>
         </div>
       </Panel>
-
-      <Panel title="Frame Preview" icon={<Aperture size={17} />}>
-        <div className="target-preview">
-          {imageUrl ? <img alt={`${target?.name} survey preview`} src={imageUrl} /> : <div>No survey preview</div>}
-          {target ? (
-            <div
-              className="frame-overlay"
-              style={{
-                width: overlayWidth,
-                height: overlayHeight,
-                transform: `translate(-50%, -50%) rotate(${target.rotationDegrees}deg)`
-              }}
-            />
-          ) : null}
-        </div>
-      </Panel>
-
+      </div>
+      <div className="targeting-column">
       <Panel title="Sequence Prep" icon={<ListTree size={17} />}>
         <div className="form-grid">
           <label>
@@ -2470,7 +2492,7 @@ function TargetingTab({
             />
           </label>
           <label>
-            Centering tolerance
+            Prepare tolerance
             <input
               type="number"
               min="1"
@@ -2483,7 +2505,8 @@ function TargetingTab({
         <div className="check-row">
           <label>
             <input
-              checked={sequencePlan.autofocusBeforeRun}
+              checked={sequencePlan.imageType === 'Light' && sequencePlan.autofocusBeforeRun}
+              disabled={sequencePlan.imageType !== 'Light'}
               type="checkbox"
               onChange={(event) => onSequencePlanChange({ autofocusBeforeRun: event.target.checked })}
             />
@@ -2491,7 +2514,8 @@ function TargetingTab({
           </label>
           <label>
             <input
-              checked={sequencePlan.guidingRequired}
+              checked={sequencePlan.imageType === 'Light' && sequencePlan.guidingRequired}
+              disabled={sequencePlan.imageType !== 'Light'}
               type="checkbox"
               onChange={(event) => onSequencePlanChange({ guidingRequired: event.target.checked })}
             />
@@ -2499,14 +2523,15 @@ function TargetingTab({
           </label>
           <label>
             <input
-              checked={sequencePlan.dither}
+              checked={sequencePlan.imageType === 'Light' && sequencePlan.dither}
+              disabled={sequencePlan.imageType !== 'Light'}
               type="checkbox"
               onChange={(event) => onSequencePlanChange({ dither: event.target.checked })}
             />
             Dither
           </label>
         </div>
-        <div className="notes-row">
+        <details className="section-details"><summary>Plan notes</summary><div className="notes-row">
           <label>
             Notes
             <textarea
@@ -2515,8 +2540,9 @@ function TargetingTab({
               onChange={(event) => onSequencePlanChange({ notes: event.target.value })}
             />
           </label>
-        </div>
-        <DataTable
+        </div></details>
+        <div className="equipment-summary"><span>Integration {formatDuration(totalIntegration)}</span><span>Estimated {formatDuration(estimatedDuration)}</span></div>
+        <details className="section-details"><summary>Output paths and plan details</summary><DataTable
           rows={[
             ['Integration', formatDuration(totalIntegration)],
             ['Estimated duration', formatDuration(estimatedDuration)],
@@ -2536,17 +2562,14 @@ function TargetingTab({
           <button type="button" disabled={storageBusy || !sessionRoot} onClick={() => void onClearSessionRoot()}>
             Clear Folder
           </button>
+        </div></details>
+        <div className="button-row">
           <button type="button" disabled={!target} onClick={onAddToQueue}>
             <Save size={16} />
             Add To Tonight
           </button>
-          <button type="button" disabled>
-            <Play size={16} />
-            Run Now
-          </button>
         </div>
       </Panel>
-
       <Panel title="Tonight" icon={<Save size={17} />}>
         {queue.length ? (
           <>
@@ -2578,6 +2601,7 @@ function TargetingTab({
           </div>
         )}
       </Panel>
+      </div>
     </div>
   );
 }
@@ -2835,7 +2859,7 @@ function AcquisitionTab({
   acquisitionEvents: AcquisitionEvent[];
   demoMode: boolean;
   appSettings: AppSettings;
-  onNavigate: (tab: TabKey) => void;
+  onNavigate: (tab: TabKey, section?: SettingsSection) => void;
   onRefreshEquipment: () => Promise<void>;
   onSetActiveQueueItem: (id: string) => void;
 }) {
@@ -2845,6 +2869,20 @@ function AcquisitionTab({
   const totalIntegration = plan ? integrationSeconds(plan) : 0;
   const estimatedDuration = plan ? totalIntegration + (plan.autofocusBeforeRun ? 180 : 0) + (plan.guidingRequired ? 90 : 0) : 0;
   const [workspaceState] = useState(loadAcquisitionWorkspaceState);
+  const [runMode, setRunMode] = useState(workspaceState.runMode);
+  const [ninaRunner] = useState(() => createNinaSequenceRunner(operationGate));
+  const [nativeMessage, setNativeMessage] = useState('');
+  const [nativePreparing, setNativePreparing] = useState(false);
+  const ninaRun = useSyncExternalStore(ninaRunner.subscribe, ninaRunner.getSnapshot);
+  const connections = useSyncExternalStore(connectionClient.subscribe, connectionClient.getSnapshot);
+  const nativeMode = (runMode === 'nina' || ninaRun.active) && !demoMode;
+  useEffect(() => { if (ninaRun.active && runMode !== 'nina') setRunMode('nina'); }, [ninaRun.active, runMode]);
+  useEffect(() => {
+    if (demoMode) return;
+    void ninaRunner.poll(connections.ninaOrigin);
+    const timer = window.setInterval(() => void ninaRunner.poll(connections.ninaOrigin), 2000);
+    return () => window.clearInterval(timer);
+  }, [ninaRunner, connections, demoMode]);
   const [previewImage, setPreviewImage] = useState<PreviewImage | null>(null);
   const [stretch, setStretch] = useState<StretchSettings>(workspaceState.stretch);
   const [renderStretch, setRenderStretch] = useState<StretchSettings>(workspaceState.stretch);
@@ -2863,7 +2901,17 @@ function AcquisitionTab({
   const [previewZoom, setPreviewZoom] = useState(workspaceState.previewZoom);
   const [phdStatus, setPhdStatus] = useState<Phd2Status | null>(null);
   const [phdMessage, setPhdMessage] = useState('');
-  const [sequenceRun, setSequenceRun] = useState<SequenceRunState>(defaultSequenceRun);
+  const [cameraRun, setSequenceRun] = useState<SequenceRunState>(defaultSequenceRun);
+  const nativeRecord = ninaRun.record ?? ninaRun.lastRecord;
+  useEffect(() => {
+    if (!ninaRun.active && nativeRecord && (nativeRecord.targetName !== activeItem?.target.name || nativeRecord.frameCount !== plan?.frameCount || nativeRecord.exposureSeconds !== plan?.exposureSeconds || nativeRecord.origin !== connections.ninaOrigin)) ninaRunner.resetCompletedView();
+  }, [ninaRunner, ninaRun.active, nativeRecord, activeItem?.target.name, plan?.frameCount, plan?.exposureSeconds, connections.ninaOrigin]);
+  const sequenceRun: SequenceRunState = nativeMode ? {
+    running: ninaRun.active, totalFrames: nativeRecord?.frameCount ?? plan?.frameCount ?? 0,
+    currentFrame: ninaRun.completedFrames, savedFrames: ninaRun.completedFrames, deliveredFramesAtStart: cameraRun.deliveredFramesAtStart,
+    phase: ninaRun.phase === 'complete' ? 'complete' : ninaRun.phase === 'aborted' ? 'aborted' : ninaRun.phase === 'stopping' || ninaRun.phase === 'cleanup' ? 'aborting' : ninaRun.phase === 'error' || ninaRun.phase === 'failed' || ninaRun.phase === 'unknown' ? 'error' : ninaRun.phase === 'running' ? 'exposing' : ninaRun.active ? 'starting' : 'idle',
+    message: ninaRun.message, startedAt: nativeRecord?.startedAt ? new Date(nativeRecord.startedAt).toLocaleTimeString() : '-', completedAt: '-'
+  } : cameraRun;
   const [targetPrep, setTargetPrep] = useState<TargetPrepState>(defaultTargetPrep);
   const [pipelineState, setPipelineState] = useState<AcquisitionPipelineState>({
     health: null,
@@ -2891,7 +2939,12 @@ function AcquisitionTab({
     const mountConnected = Boolean(equipment?.Mount?.Connected);
     const mountTracking = Boolean(equipment?.Mount?.TrackingEnabled);
     const trackingRequired = Boolean(plan && plan.imageType.toLowerCase() === 'light');
-    const guidingRequired = Boolean(plan?.guidingRequired);
+    const flipRequested = nativeMode && trackingRequired && appSettings.meridianFlipEnabled;
+    const flipNeedsFailureAction = flipRequested && appSettings.cleanupPolicy.failed.mount === 'leave';
+    const warmingRequired = nativeMode && (['complete', 'aborted', 'failed'] as const).some((outcome) => appSettings.cleanupPolicy[outcome].warm);
+    const cleanupNeedsGuide = nativeMode && plan?.imageType.toLowerCase() === 'light' && (['complete', 'aborted', 'failed'] as const).some((outcome) => appSettings.cleanupPolicy[outcome].mount !== 'leave');
+    const guidingRequired = flipRequested || cleanupNeedsGuide || Boolean(plan?.guidingRequired && (!nativeMode || plan.imageType.toLowerCase() === 'light'));
+    const focusRequired = Boolean(nativeMode && plan?.imageType.toLowerCase() === 'light' && plan.autofocusBeforeRun);
     const phdGuiding = Boolean(phdStatus?.connected && phdStatus.appState.toLowerCase().includes('guid'));
     const agentReachable = pipelineState.message === 'Agent reachable' || pipelineState.health?.status === 'ok';
 
@@ -2909,9 +2962,9 @@ function AcquisitionTab({
       {
         key: 'camera',
         label: 'Camera',
-        detail: camera?.Connected ? camera.DisplayName || camera.Name || 'Connected' : 'Disconnected',
+        detail: camera?.Connected ? warmingRequired && camera.CanSetTemperature !== true ? 'Temperature control required for cleanup' : camera.DisplayName || camera.Name || 'Connected' : 'Disconnected',
         targetTab: 'setup',
-        status: camera?.Connected ? 'ok' : 'block',
+        status: camera?.Connected && (!warmingRequired || camera.CanSetTemperature === true) ? 'ok' : 'block',
         blocking: true
       },
       {
@@ -2925,27 +2978,32 @@ function AcquisitionTab({
       {
         key: 'mount',
         label: 'Mount',
-        detail: trackingRequired
+        detail: flipNeedsFailureAction ? 'Choose flip failure stop/park action in Settings' : nativeMode && trackingRequired && mountConnected && !mountTracking ? 'NINA will enable tracking' : trackingRequired
           ? mountConnected
             ? mountTracking ? 'Tracking' : 'Tracking off'
             : 'Disconnected'
           : mountConnected
             ? mountTracking ? 'Tracking' : 'Tracking off'
             : 'Not required',
-        targetTab: 'setup',
-        status: trackingRequired
-          ? mountConnected && mountTracking ? 'ok' : 'block'
+        targetTab: flipNeedsFailureAction ? 'settings' : 'setup',
+        status: flipNeedsFailureAction ? 'block' : trackingRequired
+          ? mountConnected && (nativeMode || mountTracking) ? 'ok' : 'block'
           : mountConnected && !mountTracking ? 'warn' : 'ok',
         blocking: trackingRequired
       },
       {
+        key: 'focuser', label: 'Focuser', detail: !focusRequired ? 'Not required' : equipment?.Focuser?.Connected ? 'Connected' : 'Disconnected',
+        targetTab: 'setup', status: !focusRequired || equipment?.Focuser?.Connected ? 'ok' : 'block', blocking: focusRequired
+      },
+      {
         key: 'guiding',
         label: 'Guiding',
-        detail: guidingRequired
+        detail: flipRequested && !plan?.guidingRequired ? 'Enable guiding for flip recovery' : guidingRequired
           ? phdStatus?.connected ? phdStatus.appState || 'Connected' : phdMessage || 'Unavailable'
           : 'Not required',
-        targetTab: 'setup',
-        status: !guidingRequired || phdGuiding ? 'ok' : 'warn'
+        targetTab: flipRequested && !plan?.guidingRequired ? 'targeting' : 'setup',
+        status: flipRequested && !plan?.guidingRequired ? 'block' : !guidingRequired || (nativeMode ? Boolean(equipment?.Guider?.Connected && phdStatus?.connected) : phdGuiding) ? 'ok' : nativeMode ? 'block' : 'warn',
+        blocking: nativeMode && guidingRequired
       },
       {
         key: 'agent',
@@ -2964,14 +3022,19 @@ function AcquisitionTab({
     ];
   }, [
     activeItem,
+    appSettings.cleanupPolicy,
+    appSettings.meridianFlipEnabled,
     appSettings.autoTransferEnabled,
     camera,
     equipment?.Mount,
+    equipment?.Guider,
+    equipment?.Focuser,
     phdMessage,
     phdStatus,
     pipelineState.health?.status,
     pipelineState.message,
     plan,
+    nativeMode,
     sessionRoot
   ]);
   const readinessBlocks = readinessItems.filter((item) => item.blocking && item.status === 'block');
@@ -3070,6 +3133,7 @@ function AcquisitionTab({
 
   useEffect(() => {
     settingsClient.saveJson(acquisitionWorkspaceStorageKey, {
+      runMode,
       monitorTab,
       collapsedPanels,
       stretch,
@@ -3077,7 +3141,7 @@ function AcquisitionTab({
       previewZoomMode,
       previewZoom
     });
-  }, [collapsedPanels, fitsAutoStretch, monitorTab, previewZoom, previewZoomMode, stretch]);
+  }, [collapsedPanels, fitsAutoStretch, monitorTab, previewZoom, previewZoomMode, stretch, runMode]);
 
   useEffect(() => {
     if (demoMode) {
@@ -3892,10 +3956,36 @@ function AcquisitionTab({
     }
   };
 
+  const runNativeSequence = async () => {
+    if (nativePreparing) return;
+    setNativeMessage('');
+    if (ninaRun.active) {
+      const cleanup = ninaRun.record?.cleanupPolicy;
+      const retry = Boolean(ninaRun.record?.cleanupState);
+      if (window.confirm(`${retry ? 'Retry unverified cleanup actions?' : 'Stop the active NINA sequence?'}${cleanup ? `\n${cleanupConfirmation(cleanup, ninaRun.record!.light, ninaRun.record!.guiding)}\nUncertain commands are retried only after this confirmation.` : ''}`)) await ninaRunner.stop();
+      return;
+    }
+    if (!activeItem || !plan || externalBusy || readinessBlocks.length || operationGate.current) return;
+    setNativePreparing(true);
+    try {
+      const flip = appSettings.meridianFlipEnabled && plan.imageType.toUpperCase() === 'LIGHT' ? await prepareNinaMeridianFlip(connections.ninaOrigin) : undefined;
+      if (connections.ninaOrigin !== connectionClient.getSnapshot().ninaOrigin) throw new Error('NINA address changed during preparation. Start the run again.');
+      const record = buildNinaSequence({ target: activeItem.target, plan }, crypto.randomUUID(), connections.ninaOrigin, appSettings.cleanupPolicy, flip);
+      const actions = record.light ? `Unpark, enable tracking, slew and center.${record.autofocus ? ' Run autofocus.' : ''}${record.guiding ? ' Start guiding.' : ''}${record.dither ? ' Dither between exposures.' : ''}` : 'Capture calibration frames with the camera.';
+      const flipActions = flip ? `\nAUTOMATIC MERIDIAN FLIPS: NINA profile ${flip.name}; ${flip.minutesAfter}-${flip.maximumMinutesAfter} min after meridian, pause ${flip.pauseBefore} min before, settle ${flip.settleSeconds}s. Recenter on; refocus ${flip.autofocus ? 'on' : 'off'}. Telescope movement and guiding restart are automatic. Supervise the first real flip.` : '';
+      if (!window.confirm(`Run ${record.targetName} in NINA?\n${record.frameCount} x ${record.exposureSeconds}s ${record.imageType}\n${actions}${flipActions}\n${cleanupConfirmation(record.cleanupPolicy!, record.light, record.guiding)}\nThis replaces NINA's loaded advanced sequence. Normal completion actions run in NINA. Failure/cancellation recovery requires this app connected.`)) return;
+      setSequenceRun((current) => ({ ...current, deliveredFramesAtStart: pipelineState.health?.deliveredFrames ?? 0 }));
+      setNativePreparing(false);
+      await ninaRunner.start(record);
+    } catch (error) { setNativeMessage(error instanceof Error ? error.message : String(error)); }
+    finally { setNativePreparing(false); }
+  };
   const runProgress = sequenceRun.totalFrames ? `${sequenceRun.currentFrame} / ${sequenceRun.totalFrames}` : '-';
   const deliveredDuringRun = Math.max(0, (pipelineState.health?.deliveredFrames ?? sequenceRun.deliveredFramesAtStart) - sequenceRun.deliveredFramesAtStart);
-  const runTransferCount = Math.min(sequenceRun.savedFrames, deliveredDuringRun);
-  const activeSummary = activeItem && plan
+  const runTransferCount = nativeMode ? pipelineState.history.filter((item) => item.transferStatus !== 'failed' && item.targetName === nativeRecord?.targetName && item.transferredAtIso && Date.parse(item.transferredAtIso) >= Date.parse(nativeRecord.startedAt)).length : Math.min(sequenceRun.savedFrames, deliveredDuringRun);
+  const activeSummary = nativeMode && nativeRecord && (ninaRun.active || ninaRun.phase === 'complete' || ninaRun.phase === 'aborted' || ninaRun.phase === 'failed')
+    ? `${nativeRecord.targetName} | ${nativeRecord.imageType} | ${nativeRecord.frameCount} x ${nativeRecord.exposureSeconds}s`
+    : activeItem && plan
     ? `${activeItem.target.name} | ${plan.imageType} | ${plan.frameCount} x ${plan.exposureSeconds}s`
     : 'No active target';
   const activeTargetPrepKey = activeItem
@@ -3905,7 +3995,11 @@ function AcquisitionTab({
   const transferSeen = sequenceRun.savedFrames > 0
     ? runTransferCount >= sequenceRun.savedFrames
     : Boolean(pipelineState.history[0]?.destinationPath || previewImage?.sourcePath);
-  const runSteps = [
+  const runSteps = nativeMode ? [
+    { key: 'nina', label: 'NINA sequence', active: ninaRun.active, done: ninaRun.phase === 'complete', state: ninaRun.phase === 'error' || ninaRun.phase === 'unknown' ? 'warn' : 'ok' },
+    { key: 'capture', label: `Captured ${ninaRun.completedFrames}/${sequenceRun.totalFrames}`, active: ninaRun.phase === 'running', done: ninaRun.phase === 'complete', state: 'ok' },
+    { key: 'delivery', label: `Recent verified ${runTransferCount}`, active: pipelineState.pending.length > 0, done: false, state: pipelineState.failed.length ? 'warn' : 'ok' }
+  ] : [
     { key: 'ready', label: readinessBlocks.length ? 'Blocked' : readinessWarnings.length ? 'Check' : 'Ready', active: !sequenceRun.running && sequenceRun.phase === 'idle', done: sequenceRun.running || sequenceRun.phase !== 'idle', state: readinessBlocks.length ? 'block' : readinessWarnings.length ? 'warn' : 'ok' },
     { key: 'exposing', label: sequenceRun.phase === 'aborting' ? 'Aborting' : 'Exposing', active: sequenceRun.phase === 'starting' || sequenceRun.phase === 'exposing' || sequenceRun.phase === 'aborting', done: sequenceRun.savedFrames > 0 && !sequenceRun.running, state: sequenceRun.phase === 'aborting' ? 'warn' : 'ok' },
     { key: 'saving', label: sequenceRun.savedFrames ? `Saved ${sequenceRun.savedFrames}` : 'Saved', active: sequenceRun.phase === 'saving', done: ['waiting-transfer', 'complete', 'aborted'].includes(sequenceRun.phase), state: 'ok' },
@@ -3932,7 +4026,7 @@ function AcquisitionTab({
               key={item.key}
               title={`${item.detail}. Open ${item.targetTab}.`}
               aria-label={`${item.label}: ${item.detail}. Open ${item.targetTab}.`}
-              onClick={() => onNavigate(item.targetTab)}
+              onClick={() => onNavigate(item.targetTab, item.targetTab === 'settings' ? item.key === 'mount' ? 'run' : 'connections' : undefined)}
             >
               <span>{item.label}</span>
               <strong>{item.status === 'ok' ? 'OK' : item.status === 'block' ? 'Missing' : 'Warn'}</strong>
@@ -3942,30 +4036,28 @@ function AcquisitionTab({
       </section>
 
       <section className="run-bar">
+        <div className="run-mode" role="group" aria-label="Run mode">
+          <button type="button" aria-pressed={runMode === 'nina'} disabled={Boolean(operationKind) || sequenceRun.running} onClick={() => setRunMode('nina')}>Full sequence</button>
+          <button type="button" aria-pressed={runMode === 'camera'} disabled={Boolean(operationKind) || sequenceRun.running} onClick={() => setRunMode('camera')}>Camera only</button>
+        </div>
         <div className="run-main">
           <strong>{activeSummary}</strong>
-          <span>{sequenceRun.message}</span>
-        </div>
-        <div className="run-steps" aria-label="Acquisition run status">
-          {runSteps.map((step) => (
-            <div className={`run-step ${step.state}${step.active ? ' active' : ''}${step.done ? ' done' : ''}`} key={step.key}>
-              <span>{step.label}</span>
-            </div>
-          ))}
+          <span>{nativeMode && nativeMessage ? nativeMessage : sequenceRun.message}</span>
         </div>
         <div className="run-metrics">
-          <span>Frame {runProgress}</span>
-          <span>Saved {sequenceRun.savedFrames}</span>
-          <span>Transferred {runTransferCount}</span>
+          <span>{nativeMode ? `Captured ${sequenceRun.savedFrames}/${sequenceRun.totalFrames}` : `Frame ${runProgress}`}</span>
+          {!nativeMode ? <span>Saved {sequenceRun.savedFrames}</span> : null}
+          <span>{nativeMode ? 'Recent verified' : 'Transferred'} {runTransferCount}</span>
           <span>{camera?.CameraState || 'Camera unknown'}</span>
           <span>{formatTemp(camera?.Temperature)}</span>
-          <span>{targetPrepared ? 'Target prepared' : targetPrep.status === 'idle' ? 'Target unprepared' : targetPrep.status}</span>
-          <span>Pending {pipelineState.pending.length}</span>
-          <span>Failed {pipelineState.failed.length}</span>
-          <span>{pipelineState.autoTransfer ? 'Auto-transfer on' : 'Auto-transfer off'}</span>
+          {!nativeMode ? <span>{targetPrepared ? 'Target prepared' : targetPrep.status === 'idle' ? 'Target unprepared' : targetPrep.status}</span> : null}
+          {pipelineState.pending.length ? <span>Pending {pipelineState.pending.length}</span> : null}
+          {pipelineState.failed.length ? <span className="transfer-warning">Failed {pipelineState.failed.length}</span> : null}
+          <button type="button" className="inline-settings-button" onClick={() => onNavigate('settings', 'connections')}>{pipelineState.autoTransfer ? 'Auto-transfer on' : 'Auto-transfer off'}</button>
+          {nativeMode ? <span className={ninaRun.flip?.status === 'RUNNING' ? 'flip-active' : ''}>{nativeRecord?.meridianFlip ? flipStatusText(ninaRun.flip) : plan?.imageType.toUpperCase() !== 'LIGHT' ? 'Flips not applicable' : appSettings.meridianFlipEnabled ? 'Flips enabled (next run)' : 'Flips off'}</span> : null}
         </div>
         <button
-          className={targetPrep.running ? 'capture-button active' : ''}
+          className={`prepare-target-button${targetPrep.running ? ' capture-button active' : ''}`}
           type="button"
           disabled={targetPrep.status === 'stopping' || (operationKind !== 'prepare' && (externalBusy || Boolean(operationKind) || !activeItem || !equipment?.Mount?.Connected))}
           onClick={() => void prepareActiveTarget()}
@@ -3974,15 +4066,22 @@ function AcquisitionTab({
           {targetPrep.status === 'stopping' ? 'Stopping Prepare...' : targetPrep.running ? 'Stop Prepare' : 'Prepare Target'}
         </button>
         <button
-          className={sequenceRun.running ? 'capture-button active' : 'capture-button'}
+          className={`run-start-button capture-button${sequenceRun.running ? ' active' : ''}`}
           type="button"
-          disabled={sequenceRun.phase === 'aborting' || (operationKind !== 'capture' && (externalBusy || Boolean(operationKind) || Boolean(readinessBlocks.length)))}
-          onClick={() => void runActivePlanCapture()}
+          disabled={nativePreparing || sequenceRun.phase === 'aborting' || (nativeMode ? !ninaRun.active && (!ninaRun.ready || externalBusy || Boolean(operationKind) || Boolean(readinessBlocks.length)) : operationKind !== 'capture' && (externalBusy || Boolean(operationKind) || Boolean(readinessBlocks.length) || !demoMode && !ninaRun.ready))}
+          onClick={() => void (nativeMode ? runNativeSequence() : runActivePlanCapture())}
         >
           {sequenceRun.running ? <CircleStop size={16} /> : <Play size={16} />}
-          {sequenceRun.running ? 'Abort Run' : 'Start Run'}
+          {nativePreparing && !sequenceRun.running ? 'Preparing...' : sequenceRun.running ? nativeMode ? ninaRun.phase === 'cleanup' ? 'Cleaning up...' : ninaRun.record?.cleanupState ? 'Retry Cleanup' : 'Stop Run' : 'Abort Run' : 'Start Run'}
         </button>
       </section>
+
+      {nativeMode && ninaRun.cleanupReport ? <details className="nina-capture-stats cleanup-report" open={ninaRun.active || ninaRun.cleanupReport.steps.some((step) => step.status !== 'verified')}>
+        <summary>End-of-run actions: {ninaRun.cleanupReport.targetName} ({ninaRun.cleanupReport.outcome})</summary>
+        <div className="nina-sequence-steps" aria-label="End-of-run results">
+          {ninaRun.cleanupReport.steps.length ? ninaRun.cleanupReport.steps.map((step) => <div className={`cleanup-step ${step.status}`} key={step.action}><span>{cleanupLabels[step.action]}</span><strong title={step.message}>{step.status}</strong><span>{step.message}</span></div>) : <div>No end-of-run actions selected</div>}
+        </div>
+      </details> : null}
 
       <div className="acquisition-workspace">
         <div className="acquisition-main">
@@ -4244,6 +4343,9 @@ function AcquisitionTab({
           collapsed={collapsedPanels.details}
           onToggle={() => togglePanel('details')}
         >
+          <details className="section-details"><summary>Run stages</summary><div className={`run-steps${nativeMode ? ' native-sequence' : ''}`} aria-label="Acquisition run status">
+            {runSteps.map((step) => <div className={`run-step ${step.state}${step.active ? ' active' : ''}${step.done ? ' done' : ''}`} key={step.key}><span title={step.label}>{step.label}</span></div>)}
+          </div></details>
           <div className="monitor-tabs">
             {([
               ['stats', 'Frame Stats'],
@@ -4326,6 +4428,7 @@ function AcquisitionTab({
                 ]}
               />
             </div>
+            {nativeMode && ninaRun.steps.length ? <details className="nina-capture-stats"><summary>NINA sequence steps</summary><div className="nina-sequence-steps" aria-label="NINA sequence steps">{ninaRun.steps.map((step, index) => <div key={index}><span>{step.name}</span><strong>{step.status}</strong></div>)}</div></details> : null}
             <details className="nina-capture-stats">
               <summary>NINA capture statistics (latest API result, not the loaded file)</summary>
               <DataTable rows={[
@@ -4490,8 +4593,9 @@ function FrameTransferPanel({
   };
 
   const addTransferHistoryItem = (item: TransferHistoryItem) => {
+    const receipt = { ...item, transferredAtIso: new Date().toISOString() };
     setTransferHistory((current) => {
-      const next = [item, ...current.filter((existing) => existing.id !== item.id)].slice(0, 25);
+      const next = [receipt, ...current.filter((existing) => existing.id !== item.id)].slice(0, 25);
       settingsClient.saveJson(transferHistoryStorageKey, { items: next });
       return next;
     });
@@ -5134,6 +5238,8 @@ function DiagnosticsTab({
 }
 
 function SettingsTab({
+  section,
+  onSectionChange,
   demoMode,
   onTransferBusyChange,
   appSettings,
@@ -5143,6 +5249,8 @@ function SettingsTab({
   onChooseSessionRoot,
   onClearSessionRoot
 }: {
+  section: SettingsSection;
+  onSectionChange: (section: SettingsSection) => void;
   demoMode: boolean;
   onTransferBusyChange: (busy: boolean) => void;
   appSettings: AppSettings;
@@ -5155,6 +5263,20 @@ function SettingsTab({
   const [ninaAddress, setNinaAddress] = useState(appSettings.ninaOrigin);
   const [stellariumAddress, setStellariumAddress] = useState(appSettings.stellariumOrigin);
   const [connectionError, setConnectionError] = useState('');
+  const [flipProfile, setFlipProfile] = useState<MeridianFlipProfile | null>(null);
+  const [flipProfileError, setFlipProfileError] = useState('');
+  const [flipProfileBusy, setFlipProfileBusy] = useState(false);
+  const flipReadId = useRef(0);
+  useEffect(() => { ++flipReadId.current; setFlipProfile(null); setFlipProfileError(''); setFlipProfileBusy(false); }, [appSettings.ninaOrigin]);
+  const refreshFlipProfile = async () => {
+    const id = ++flipReadId.current;
+    setFlipProfileBusy(true); setFlipProfileError(''); setFlipProfile(null);
+    try {
+      const profile = await readNinaMeridianProfile(appSettings.ninaOrigin);
+      if (id === flipReadId.current) setFlipProfile(profile);
+    } catch (error) { if (id === flipReadId.current) setFlipProfileError(error instanceof Error ? error.message : String(error)); }
+    finally { if (id === flipReadId.current) setFlipProfileBusy(false); }
+  };
   useEffect(() => {
     setNinaAddress(appSettings.ninaOrigin);
     setStellariumAddress(appSettings.stellariumOrigin);
@@ -5174,7 +5296,11 @@ function SettingsTab({
   };
 
   return (
-    <div className="tab-grid settings-grid">
+    <div className="settings-workspace">
+      <nav className="settings-sections" aria-label="Settings sections">
+        {([['connections', 'Connections & Storage'], ['run', 'Run Policies'], ['preview', 'Preview']] as const).map(([key, label]) => <button type="button" key={key} className={section === key ? 'active' : ''} aria-pressed={section === key} onClick={() => onSectionChange(key)}>{label}</button>)}
+      </nav>
+      <div className="tab-grid settings-grid" hidden={section !== 'connections'}>
       <Panel title="Connections" icon={<Wifi size={17} />} className="settings-connections-panel">
         <div className="settings-list">
           <label className="settings-field">
@@ -5201,7 +5327,8 @@ function SettingsTab({
         onChooseSessionRoot={onChooseSessionRoot}
         onClearSessionRoot={onClearSessionRoot}
       />
-
+      </div>
+      <div className="settings-preview-workspace" hidden={section !== 'preview'}>
       <Panel title="Preview" icon={<Aperture size={17} />} className="settings-preview-panel">
         <div className="settings-list">
           <label className="settings-check">
@@ -5237,6 +5364,44 @@ function SettingsTab({
           </label>
         </div>
       </Panel>
+      </div>
+      <div className="tab-grid settings-grid" hidden={section !== 'run'}>
+      <Panel title="End-of-run actions" icon={<CircleStop size={17} />}>
+        <div className="cleanup-settings">
+          <div className="cleanup-setting-row"><strong>Full sequence</strong><strong>Stop guiding</strong><strong>Mount (lights only)</strong><strong>Warm camera</strong></div>
+          {(['complete', 'aborted', 'failed'] as const).map((outcome) => {
+            const row = appSettings.cleanupPolicy[outcome];
+            const label = outcome === 'complete' ? 'Completion' : outcome === 'aborted' ? 'Cancellation' : 'Failure';
+            const update = (values: Partial<typeof row>) => onUpdateAppSettings({ cleanupPolicy: normalizeCleanupPolicy({ ...appSettings.cleanupPolicy, [outcome]: { ...row, ...values } }) });
+            return <div className="cleanup-setting-row" key={outcome}>
+              <span>{label}</span>
+              <input type="checkbox" aria-label={`${label}: stop planned guiding`} checked={row.stopGuiding} disabled={row.mount !== 'leave'} onChange={(event) => update({ stopGuiding: event.target.checked })} />
+              <select aria-label={`${label}: mount action`} value={row.mount} onChange={(event) => update({ mount: event.target.value as typeof row.mount })}>
+                <option value="leave">Leave unchanged</option><option value="tracking">Stop tracking</option><option value="park">Park mount</option>
+              </select>
+              <input type="checkbox" aria-label={`${label}: warm camera`} checked={row.warm} onChange={(event) => update({ warm: event.target.checked })} />
+            </div>;
+          })}
+          <label className="settings-field"><span>Warming duration (minutes)</span><input type="number" min="1" max="60" step="1" value={appSettings.cleanupPolicy.warmMinutes} onChange={(event) => { const minutes = Number(event.target.value); if (Number.isInteger(minutes) && minutes >= 1 && minutes <= 60) onUpdateAppSettings({ cleanupPolicy: { ...appSettings.cleanupPolicy, warmMinutes: minutes } }); }} /></label>
+        </div>
+      </Panel>
+      <Panel title="Meridian flips" icon={<Telescope size={17} />}>
+        <div className="cleanup-settings">
+          <label className="settings-check"><input type="checkbox" checked={appSettings.meridianFlipEnabled} onChange={(event) => onUpdateAppSettings({ meridianFlipEnabled: event.target.checked })} /><span><strong>Automatic meridian flips (full light sequences)</strong></span></label>
+          <div className="button-row"><button type="button" disabled={demoMode || flipProfileBusy} onClick={() => void refreshFlipProfile()}><RefreshCw size={16} />{flipProfileBusy ? 'Reading...' : 'Read NINA flip profile'}</button></div>
+          {flipProfileError ? <div className="inline-note" role="alert">{flipProfileError}</div> : null}
+        </div>
+        <DataTable rows={[
+          ['Profile', flipProfile?.name || 'Not read'],
+          ['Flip window after meridian', flipProfile ? `${flipProfile.minutesAfter}-${flipProfile.maximumMinutesAfter} min` : undefined],
+          ['Pause before meridian', flipProfile ? `${flipProfile.pauseBefore} min` : undefined],
+          ['Settle after flip', flipProfile ? `${flipProfile.settleSeconds} s` : undefined],
+          ['Use pier side', flipProfile?.useSideOfPier], ['Recenter', flipProfile?.recenter],
+          ['Refocus after flip', flipProfile?.autofocus], ['Rotate preview', flipProfile?.rotatePreview],
+          ['Outdoor flip validation', 'Pending']
+        ]} />
+      </Panel>
+      </div>
     </div>
   );
 }
@@ -5263,6 +5428,7 @@ function App() {
   } = useNinaStatus(demoMode, settingsHydrated && connectionsReady);
   const { socketStatus, events, acquisitionEvents } = useNinaEvents(httpStatus === 'online');
   const [activeTab, setActiveTab] = useState<TabKey>(initialPlannerState.activeTab ?? 'setup');
+  const [settingsSection, setSettingsSection] = useState<SettingsSection>('connections');
   const [commandMessage, setCommandMessage] = useState('');
   const [commandBusy, setCommandBusy] = useState('');
   const [target, setTarget] = useState<ImportedTarget | null>(initialPlannerState.target ?? null);
@@ -5925,13 +6091,15 @@ function App() {
           acquisitionEvents={acquisitionEvents}
           demoMode={demoMode}
           appSettings={appSettings}
-          onNavigate={setActiveTab}
+          onNavigate={(tab, section) => { setActiveTab(tab); if (section) setSettingsSection(section); }}
           onRefreshEquipment={refresh}
           onSetActiveQueueItem={setActiveQueueId}
         />
       </div> : null}
       {settingsHydrated ? <div hidden={activeTab !== 'settings'}>
         <SettingsTab
+          section={settingsSection}
+          onSectionChange={setSettingsSection}
           demoMode={demoMode}
           onTransferBusyChange={setTransferActive}
           appSettings={appSettings}

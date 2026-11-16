@@ -1,5 +1,5 @@
 export type Operation = {
-  readonly kind: 'prepare' | 'capture' | 'preview';
+  readonly kind: 'prepare' | 'capture' | 'preview' | 'sequence';
   cancelled: boolean;
   workPending: boolean;
   stopPending: boolean;

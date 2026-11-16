@@ -52,6 +52,7 @@ try {
     const settings = {
       'astro-demo-mode': false,
       'storage-session-root': '/mock/astro',
+      'astro-acquisition-workspace-v1': { runMode: 'camera' },
       'straylight-app-settings-v1': { agentBase: 'http://agent.test', autoTransferEnabled: true, autoLoadLatestFrame: false, autoRenderFitsOnArrival: false, previewRenderSize: 'fast' },
       'astro-planner-state-v1': { activeTab: 'acquisition', target, sequencePlan: plan, activeQueueId: 'test-target', queue: [{ id: 'test-target', target, plan }] }
     };
@@ -129,6 +130,8 @@ try {
     if (url.origin === origin && url.pathname.startsWith('/nina-api/')) {
       const path = url.pathname.replace('/nina-api/', '');
       if (path === 'equipment/info') return json(envelope(equipment));
+      if (path === 'profile/show') return json(envelope({ Id: 'mock-profile', Name: 'Mock GEM profile', MeridianFlipSettings: { MinutesAfterMeridian: 5, MaxMinutesAfterMeridian: 10, PauseTimeBeforeMeridian: 0, SettleTime: 30, UseSideOfPier: true, Recenter: true, AutoFocusAfterFlip: false, RotateImageAfterFlip: false } }));
+      if (path === 'sequence/json') return json(envelope([{ GlobalTriggers: [] }, ...['Start','Targets','End'].map((name) => ({ Name: `${name}_Container`, Status: 'CREATED', Items: [] }))]));
       if (path === 'equipment/mount/info') return json(envelope(equipment.Mount));
       if (path === 'equipment/camera/info') return json(envelope(equipment.Camera));
       if (path.startsWith('version')) return json(envelope('test'));
@@ -196,6 +199,15 @@ try {
   assert.equal(commands.filter((path) => path === 'equipment/mount/slew').length, 0);
   console.log('PASS stop during unpark prevents subsequent tracking and slew');
 
+  await tab('Setup').click();
+  await page.getByRole('button', { name: 'Collapse Focus', exact: true }).click();
+  assert.equal(await page.getByRole('button', { name: 'Start AF', exact: true }).isVisible(), false);
+  await tab('Targeting').click(); await tab('Setup').click();
+  await page.getByRole('button', { name: 'Expand Focus', exact: true }).click();
+  assert.equal(await page.getByRole('button', { name: 'Start AF', exact: true }).isVisible(), true);
+  await tab('Acquisition').click();
+  console.log('PASS setup panel collapse is remembered across workflow tabs');
+
   await page.getByRole('button', { name: 'Prepare Target', exact: true }).click();
   await waitFor(() => Boolean(releaseSlew), 'slew started');
   failStop = true;
@@ -262,6 +274,43 @@ try {
   await automaticTransfer.check();
   await tab('Acquisition').click();
   console.log('PASS write errors and invalid readback results prevent acknowledgement; verified retry succeeds');
+
+  await tab('Settings').click();
+  const beforeCleanupSettings = commands.length;
+  await page.getByRole('button', { name: 'Run Policies', exact: true }).click();
+  assert.equal(await page.getByLabel('Completion: mount action', { exact: true }).inputValue(), 'leave');
+  assert.equal(await page.getByLabel('Completion: warm camera', { exact: true }).isChecked(), false);
+  await page.getByLabel('Completion: mount action', { exact: true }).selectOption('park');
+  assert.equal(await page.getByLabel('Completion: stop planned guiding', { exact: true }).isDisabled(), true);
+  await page.getByLabel('Failure: warm camera', { exact: true }).check();
+  await page.getByLabel('Warming duration (minutes)', { exact: true }).fill('7');
+  await page.waitForFunction(() => JSON.parse(localStorage.getItem('straylight-app-settings-v1')).cleanupPolicy?.warmMinutes === 7);
+  const cleanupSettings = await page.evaluate(() => JSON.parse(localStorage.getItem('straylight-app-settings-v1')).cleanupPolicy);
+  assert.equal(cleanupSettings.complete.mount, 'park'); assert.equal(cleanupSettings.failed.warm, true);
+  assert.equal(commands.length, beforeCleanupSettings);
+  await page.screenshot({ path: 'ui-cleanup-settings.png', fullPage: true });
+  await page.getByLabel('Completion: mount action', { exact: true }).selectOption('leave');
+  await page.getByLabel('Failure: warm camera', { exact: true }).uncheck();
+  await tab('Acquisition').click();
+  console.log('PASS cleanup settings persist, enforce guide stop before mount actions, and send no hardware commands');
+
+  await tab('Settings').click();
+  const beforeFlipSettings = commands.length;
+  await page.getByRole('button', { name: 'Run Policies', exact: true }).click();
+  const flipToggle = page.getByRole('checkbox', { name: 'Automatic meridian flips (full light sequences)', exact: true });
+  assert.equal(await flipToggle.isChecked(), false);
+  await flipToggle.check();
+  await page.getByRole('button', { name: 'Read NINA flip profile', exact: true }).click();
+  await page.getByText('Mock GEM profile', { exact: true }).waitFor();
+  await page.waitForFunction(() => JSON.parse(localStorage.getItem('straylight-app-settings-v1')).meridianFlipEnabled === true);
+  assert.equal(commands.length, beforeFlipSettings);
+  for (const width of [1920, 3440, 1280]) {
+    await page.setViewportSize({ width, height: width === 3440 ? 1440 : 1080 });
+    await page.screenshot({ path: `ui-meridian-settings-${width}.png`, fullPage: true });
+    assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1));
+  }
+  await flipToggle.uncheck(); await tab('Acquisition').click();
+  console.log('PASS meridian flip settings use read-only NINA profile data, persist opt-in, and fit desktop widths');
 
   const beforeDemo = commands.length;
   await page.getByRole('button', { name: /Demo Data/i }).click();

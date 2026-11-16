@@ -1,0 +1,123 @@
+{
+  "source": "NINA 3.2.0.9001 / Advanced API 2.2.15.2; load/readback only, never started",
+  "profile": {
+    "id": "fixture-profile",
+    "name": "Fixture GEM",
+    "minutesAfter": 5,
+    "maximumMinutesAfter": 10,
+    "pauseBefore": 0,
+    "settleSeconds": 30,
+    "useSideOfPier": true,
+    "recenter": true,
+    "autofocus": false,
+    "rotatePreview": false
+  },
+  "sequence": [
+    {
+      "GlobalTriggers": []
+    },
+    {
+      "Conditions": [],
+      "Triggers": [],
+      "Status": "CREATED",
+      "Name": "Start_Container",
+      "Items": [
+        {
+          "Status": "CREATED",
+          "Name": "Unpark Scope"
+        },
+        {
+          "TrackingMode": "Sidereal",
+          "Status": "CREATED",
+          "Name": "Set Tracking"
+        }
+      ]
+    },
+    {
+      "Conditions": [],
+      "Triggers": [],
+      "Status": "CREATED",
+      "Name": "Targets_Container",
+      "Items": [
+        {
+          "Conditions": [],
+          "Triggers": [],
+          "Status": "CREATED",
+          "Name": "SLS flip-load-probe SLS_FLIP_LOAD_PROBE_Container",
+          "Items": [
+            {
+              "Coordinates": {
+                "RA": 0.7123133333333331,
+                "RAString": "00:42:44",
+                "RADegrees": 10.684699999999998,
+                "Dec": 41.269,
+                "DecString": "41° 16' 08\"",
+                "Epoch": "J2000"
+              },
+              "Status": "CREATED",
+              "Name": "Slew and center"
+            },
+            {
+              "ForceCalibration": false,
+              "Status": "CREATED",
+              "Name": "Start Guiding"
+            },
+            {
+              "Conditions": [
+                {
+                  "CompletedIterations": 0,
+                  "Iterations": 2,
+                  "Status": "CREATED",
+                  "Name": "Loop For Iterations_Condition"
+                }
+              ],
+              "Triggers": [
+                {
+                  "Status": "CREATED",
+                  "Name": "Meridian Flip_Trigger",
+                  "TimeToFlip": 24
+                },
+                {
+                  "Exposures": 0,
+                  "TargetExposures": 1,
+                  "Status": "CREATED",
+                  "Name": "Dither after Exposures_Trigger"
+                }
+              ],
+              "Status": "CREATED",
+              "Name": "SLS Capture flip-load-probe_Container",
+              "Items": [
+                {
+                  "ExposureTime": 1,
+                  "Gain": 200,
+                  "ExposureCount": 0,
+                  "Offset": 8,
+                  "Name": "Take Exposure",
+                  "Type": "LIGHT",
+                  "Binning": {
+                    "Name": "1x1",
+                    "X": 1,
+                    "Y": 1
+                  },
+                  "Status": "CREATED"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "Conditions": [],
+      "Triggers": [],
+      "Status": "CREATED",
+      "Name": "End_Container",
+      "Items": [
+        {
+          "Status": "CREATED",
+          "Name": "Stop Guiding"
+        }
+      ]
+    }
+  ]
+}

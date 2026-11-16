@@ -1,6 +1,6 @@
 # UI Principles
 
-The imaging control UI should follow the Uncodixfy standard as much as practical: normal, functional, restrained interface design that feels closer to Linear, Raycast, Stripe, or GitHub than a generic AI-generated dashboard.
+The imaging control UI should be purpose-built for an observing session: clear controls, readable data, and an obvious next action. Uncodixfy is a useful reference, not a rigid template. Workflow and usability take precedence over blanket stylistic rules; avoid generic dashboard decoration without stripping away useful affordances.
 
 Source reference: https://github.com/cyxzdev/Uncodixfy/blob/main/Uncodixfy.md
 
@@ -21,6 +21,8 @@ The UI should not cosplay as a spacecraft console. The telescope, frame previews
 - Use tabs, segmented controls, tables, split panes, and lists where they match the workflow.
 - Prefer stateful controls over separate start/stop/cancel button clusters when the action is naturally a mode.
 - Put secondary detail behind local tabs when a workflow panel starts reading like a spreadsheet.
+- Use fixed, task-focused columns with independent vertical stacks. Do not stretch one section to match an unrelated tall neighbor.
+- Make sections collapsible, remembering the user's choice. Hiding a section must not unmount active work or interrupt capture, transfer, or rendering.
 - Keep transitions short and functional: color, opacity, or simple state changes.
 - Let real content carry the screen: frame previews, target data, guide metrics, equipment state, logs, and session progress.
 
@@ -43,15 +45,18 @@ The UI should not cosplay as a spacecraft console. The telescope, frame previews
 The app should be organized around real astrophotography workflows:
 
 - Persistent status bar: miniPC connection plus camera, mount, focuser, and guiding status lights.
-- Setup tab: camera setup, cooling, focus/autofocus, Three Point Polar Alignment workflow and adjustment instructions, mount and guider readiness.
-- Targeting tab: Stellarium import, target details, framing, sequence preparation, and run plan.
+- Setup tab: compact camera/cooling and mount readiness controls beside polar alignment and focus. Keep device inventories, alignment capture settings, and prior results in disclosures.
+- Targeting tab: selection and framing in one column; exposure planning and Tonight queue in the other. Source metadata, notes, and output-path detail are secondary.
 - Acquisition tab: Prepare Target, current capture state, live frame preview, PHD2 guiding graph, non-destructive preview stretching, delivery status, and quality checks.
-- Settings tab: local image destination, frame-agent URL, auto-transfer behavior, and frame transfer monitor.
+- Review tab: folder-based FITS inspection and keep/reject decisions, separate from live acquisition.
+- Settings tab: Connections & Storage, Run Policies, and Preview sections. Keep transfer monitoring mounted across section changes. Readiness links should select the relevant section.
 - Diagnostics tab: timestamped events, API status, raw event inspection, capability checks, and parser probes.
 
 The first screen should be the actual working session view, not a landing page.
 
 Do not recreate the entire NINA UI. Keep only the controls that are useful from the main-machine command surface.
+
+November 14, 2026: fixed layouts and collapsible sections are the current scope. Docking/movable panels are explicitly deferred; no new UI framework is required for this pass. The desktop content area can grow to 2560px on ultrawide screens without enlarging type.
 
 ## Live Preview And Processing
 

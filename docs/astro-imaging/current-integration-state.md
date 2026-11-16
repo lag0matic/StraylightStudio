@@ -1,8 +1,46 @@
 # Current Integration State
 
-Last updated: 2026-10-28.
+Last updated: 2026-11-14.
 
 This file is the short handoff note for where Straylight Studio actually stands right now.
+
+## November 14 UI Cleanup
+
+- Kept the six workflow tabs and existing equipment behavior. Setup now puts compact equipment controls beside alignment/focus; device inventories and secondary results are expandable. Target selection/framing and exposure/queue planning use independent columns, without stretched grid rows or a disabled Run Now placeholder.
+- Settings now has Connections & Storage, Run Policies, and Preview sections. Readiness links select the appropriate settings section, and the single auto-transfer control remains in Settings. Hidden views remain mounted so polling/transfers continue.
+- Panels are collapsible with remembered preferences and hide rather than unmount their contents. Acquisition retains image/stretch/guiding plus a compact run bar; duplicate stage indicators moved into Run Details, and zero-count transfer boxes no longer crowd the bar. Ultrawide content can use 2560px without scaling fonts.
+- Survey image failures now show an unavailable state instead of a broken image or an unreferenced frame overlay. Disconnected mount states no longer imply known parked/slewing values.
+- Verified all six screens and Settings sections at 1920x1080, 3440x1440, and 1280x900 in an isolated demo browser. Workflow tests cover collapse persistence and existing capture/cancel/transfer safeguards. The separate Windows desktop mock profile passed native networking, FITS preview/stretch/statistics, and populated session-review checks. All 87 core tests passed. No real telescope commands were sent; sky-validation requirements below are unchanged. Docking remains deferred.
+
+## October 31 Live Indoor Validation
+
+Full sequence mode is now implemented through NINA's Advanced Sequencer, with durable run identity, load/readback/start ordering, stop verification, and monitoring after app restart. A native three-frame DARK sequence completed with the indoor app closed, then all three queued frames transferred and verified when the app reopened. A separate native sequence stop completed in about 1.9 seconds without starting its second exposure. The full light plan was loaded/read back but not executed indoors. See [Sequence Execution](sequence-execution.md) for protocol details, tests, and the remaining overnight limitations.
+
+### Initial Camera Checks
+
+- Tested the bundled Windows desktop app against Starrunner with the ASI183MC Pro connected and the mount disconnected. NINA reports 3.2.0.9001, Advanced API 2.2.15.2, and PHD2 2.6.14.
+- Saved-hostname connections work through native desktop HTTP, with the NINA event stream open. PHD2 reports connected/Stopped with no guide samples. Separate PowerShell hostname probes timed out intermittently; the known IPv4 address worked, and no saved endpoint change was needed in the app.
+- A temporary one-frame, one-second DARK plan completed through Start Run. The 40,368,960-byte FITS transferred automatically to F:\Astro, its on-disk SHA-256 matched the delivery record, and the app automatically rendered its 5496 x 3672 samples, statistics, and histogram. Agent delivered count changed from 5 to 6, with zero pending.
+- A second temporary plan requested two 30-second DARK frames. Abort Run was clicked while the first frame was exposing. The abort took about 28.9 seconds to settle; NINA saved and delivered the first frame, but the second exposure never started. The app waited for command settlement and an idle camera read before releasing the operation gate. This path behaves as stop-after-current-frame in the observed run, not an immediate exposure termination.
+- After a normal Windows close and a fresh app process launch, delivered count remained 7, pending remained zero, both test delivery records persisted, and both destination files retained their sizes and modification times. No duplicate transfer or image rewrite was observed.
+- Original observing plan restored; test files retained under the clearly named SLS_INDOOR_20261031_SHORT and SLS_INDOOR_20261031_ABORT session folders. Camera was idle with cooler off before and after. No mount commands, autofocus, TPPA, or guiding-start commands were sent.
+- Mount preparation/stop behavior and real-sky autofocus, guiding, centering, and TPPA remain unverified by this session. Linux execution remains unverified.
+
+### Supervised Cleanup Checks
+
+- With the capped scope indoors and explicitly cleared for movement, Setup Stop Tracking confirmed tracking off/not slewing. Isolated native End-only sequences then executed Stop Guiding plus Set Tracking (native stopped mode 5) and Stop Guiding plus Park Scope. They contained no target preparation, capture, autofocus, solve, or guiding-start instructions. Native tracking-off settled in about 2.1 seconds; parking took about 14 seconds and confirmed AtPark=true, TrackingEnabled=false, Slewing=false. Instruction completion preceded the tracking telemetry update, so the test waited for actual device state.
+- The recovery API parking endpoint was separately checked after a controlled unpark, then confirmed parked/tracking off/not slewing in about 4.2 seconds. This validates the endpoint, not an end-to-end failure-triggered parking workflow. PHD2 was connected/Stopped throughout; stopping an actively guiding session remains untested without sky.
+- A one-second DARK sequence applied native completion warming after mild cooling to 19.5 C. The cooler turned fully off, the app verified cleanup and cleared ownership, and the 40,368,960-byte dark transferred to F:\Astro with matching SHA-256. NINA shortened this warm-up because the sensor was already within its target tolerance; the completion test took about 24.8 seconds.
+- A separate two-frame, twenty-second DARK sequence was stopped during its first exposure after cooling to 18.5 C. The app-owned cancellation warming path ran its timed ramp, then confirmed CoolerOn=false and idle camera before releasing ownership. The whole stop/cleanup test took about 87 seconds; no second exposure or aborted-test file was observed. The mount stayed parked and tracking off.
+- Original observing plan and cleanup settings restored; defaults still leave mount/cooling unchanged. Final state: mount parked, tracking off, not slewing; camera idle/cooler off; PHD2 connected/Stopped; agent pending=0, delivered=11. No plate solve, autofocus, guiding-start, or TPPA was attempted. Automatic failure cleanup orchestration, active-guide stopping, full light execution, and Linux still need appropriate validation.
+- Local diagnostic reports are under ignored `tmp/live-camera/supervised-*.json`; the test dark is retained in `F:\Astro\oct312026_sls_indoor_20261031_end_warm_dark`.
+
+## Native Meridian-Flip Integration
+
+- Opt-in Settings control adds NINA's native flip trigger to full light captures alongside dithering. Fresh active-profile and equipment checks run before start; source timing/recenter/refocus choices are read-only. Flips require planned guiding, re-centering, and a failure stop-tracking/park policy. Calibration and Camera only do not flip. Defaults remain disabled.
+- Acquisition shows native trigger state and hours-derived timing. Missing/disabled/failed protection uses failure cleanup while connected; running flips retain ownership. NINA owns execution and recovery on Starrunner, without a client-side timer or flip command replay.
+- The installed NINA/API loaded and returned the correct flip and dither triggers without execution. The scope remained parked, tracking off, camera idle/cooler off. Original app observing settings were not changed; NINA was left with an empty unstarted diagnostic template. The real API response is a regression fixture.
+- Physical flips/re-centering/guide restart remain untested. NINA 3.2 best-effort re-centering and the native trigger's discarded boolean result mean FINISHED is not proof of success; the API after-flip event has no success flag. These limits are explicit in [Sequence Execution](sequence-execution.md#meridian-flips). Supervise the first actual flip before considering unattended imaging.
 
 ## October Session Review
 
@@ -112,9 +150,9 @@ Tracking was intentionally turned off from Straylight Studio as a UI test. Use `
 
 - Prepare Target has not been tested outdoors under real plate-solving conditions.
 - Prepare Target uses NINA `equipment/mount/slew` with `center=true`; exact behavior depends on NINA/ASTAP solving successfully.
-- Start Run is still a camera saved-capture loop. It does not yet automatically call Prepare Target, autofocus, start guiding, dither, handle meridian flips, or run a full NINA advanced sequence.
-- Guiding is monitored, but Straylight Studio does not yet start or stop guiding.
-- Autofocus can be started/canceled, but it is not integrated into the saved capture run.
+- Start Run defaults to Full sequence, which delegates the active target's preparation, optional autofocus/guiding, exposure loop, and optional dithering to NINA. Camera only retains the earlier capture loop. Settings has distinct completion/cancellation/failure actions for guider stop, mount stop/park, and gradual warming. Normal completion uses NINA End instructions; failure/cancel recovery requires the connected app, persisted command intent, and verified device state. Defaults do not move the mount or change cooling. Native end-only mount actions and real completion/cancellation warming passed supervised indoor checks; failure-triggered orchestration and active-guide stopping are not hardware validated. Native meridian flips are opt-in and load/readback validated, not physically tested. See [Sequence Execution](sequence-execution.md).
+- Guiding is monitored, and generated full light sequences delegate start/settling and normal stop to NINA. Separate manual guider start/stop controls are not yet exposed.
+- Autofocus can be started/canceled independently and is included in generated full light sequences when requested. Camera-only diagnostic runs do not perform autofocus. Real-star accuracy remains unverified.
 - TPPA command and parsing paths exist, but full live adjustment behavior still needs real-sky testing.
 - FITS preview now caches full-resolution, unstretched sample statistics: exact median, mean, min/max, population standard deviation, a 256-bin histogram, and percentages at/below zero and at a known upper threshold. These are separate from NINA's latest API statistics. Histogram counts can be linear or logarithmic; display stretch does not change the measurements.
 - Analysis applies BSCALE/BZERO, excludes integer BLANK and nonfinite samples, and uses raw samples before debayering. SATURATE is treated as a threshold in scaled FITS units when present; otherwise integer data reports the file ceiling, not assumed sensor saturation. Floating-point images without SATURATE report unknown saturation. Only two-dimensional primary images are supported; cubes are explicitly rejected.
@@ -159,9 +197,9 @@ http://192.168.4.251:4787/health
 
 ## Recommended Next Work
 
-1. Validate the protected writer with the real desktop/agent transfer path; offline filesystem and mocked acknowledgement checks are in place.
-2. Validate the standalone native connections against the live rig; Linux packaging remains unverified. The Windows bundled-app transport checks are now in place.
-3. Validate stop/readback handling against real NINA when the rig is available.
-4. Add guiding start/stop and integrate autofocus before run.
-5. Add sequence orchestration around prepare, autofocus, guiding, capture, transfer, and abort behavior.
+1. Validate mount preparation and slew-stop/readback handling against real NINA when the mount is available. Camera capture, abort/readback, automatic delivery, and app restart were checked indoors on October 31.
+2. Validate Linux builds and packaging. Windows standalone connections and the real camera/agent transfer path are now checked.
+3. Validate autofocus, guiding, centering, and TPPA under real sky conditions.
+4. Validate the generated light sequence's autofocus, guider settling/dithering, and stop behavior under real sky conditions.
+5. Supervise a real meridian flip and validate failure-triggered cleanup/active-guide stopping; add multi-target queue execution. App-owned failure recovery is not a telescope-side safety supervisor.
 6. Extend local FITS analysis with star-based quality metrics, then connect reviewed selections to Siril processing.

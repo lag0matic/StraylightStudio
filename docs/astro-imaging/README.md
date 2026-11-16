@@ -51,14 +51,15 @@ Currently working:
 - Desktop local storage root selection, session folder naming, FITS writes, SHA-256 verification, and duplicate-safe acknowledgement.
 - FITS preview rendering, stretch controls, and FITS header inspection in Tauri.
 - Native desktop connections configured in Settings, independent of the Vite development proxy.
+- NINA-owned full-sequence execution for the active target, with durable ownership and reconnect monitoring. See [Sequence Execution](sequence-execution.md).
 - Full-resolution FITS statistics and histogram inspection.
 - Offline session review from local folders and UNC network shares, with persistent keep/reject/undecided decisions and untouched originals.
 
 Still not complete:
 
 - Full unattended sequence orchestration.
-- Automatic prepare/autofocus/guide/capture/dither flow.
-- Guiding start/stop from Straylight Studio.
+- Real-sky validation of the generated prepare/autofocus/guide/capture/dither flow.
+- Supervised real meridian flips, failure-triggered cleanup, and active-guide stop validation; multi-target queue handling. Native flips passed load/readback only; end-only mount actions and completion/cancellation warming passed indoor checks. Failure/cancellation cleanup currently needs the app connected.
 - Live-sky validation of Prepare Target and TPPA parsing.
 - Siril processing integration.
 

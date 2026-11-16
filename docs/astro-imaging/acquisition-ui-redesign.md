@@ -8,7 +8,9 @@ The Acquisition view should behave like a live imaging console, not a report das
 - Is guiding stable enough to keep going?
 - If something fails, where should I look first?
 
-The current prototype has the right plumbing, but too many values are shown as large table panels. The next iteration should make the live workflow visible at a glance and push less urgent detail one layer deeper.
+The November 14 cleanup keeps the live workflow visible at a glance and puts less urgent detail one layer deeper. The primary run bar retains target, current state, progress, delivery information, and start/stop actions without repeating the same counts in a second strip. Run stages are available in a disclosure under Run Details. Pending/failed counts are emphasized when nonzero rather than displaying permanent zero-value boxes.
+
+Panels now hide their contents without unmounting them. Existing Acquisition collapse preferences remain controlled by the workspace; other sections remember their own collapse state. The image, stretch controls, and guiding graph remain the primary acquisition surface. No docking or backend sequencing changes are included.
 
 ## Default Workflow
 

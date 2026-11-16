@@ -58,7 +58,7 @@ The long-term runtime target is a Tauri desktop app for Windows and Linux. The c
 
 Autofocus, TPPA, cooling, preview exposure, Prepare Target, and saved capture-run actions can move hardware or run camera/focuser operations. The UI asks for confirmation before starting autofocus, TPPA, cooling, warming, a test exposure, Prepare Target, or a saved capture run.
 
-Prepare Target is separate from Start Run. Start Run still only saves camera frames through NINA; it does not yet automatically prepare the target, start guiding, run autofocus, dither, handle meridian flips, or execute a full NINA advanced sequence.
+Start Run defaults to Full sequence, which loads a native advanced sequence into NINA and starts it with validation enabled. NINA owns target preparation, optional autofocus/guiding, the exposure loop, optional dithering, configured completion actions, and opt-in native meridian flips. Flip timing and recovery use the active NINA profile; Settings exposes read-only profile inspection and an opt-in toggle. Actual flips still need supervised sky validation. Reopening the app monitors the saved run rather than replaying load/start. Settings supplies separate completion, cancellation, and failure cleanup policies; recovery from cancellation/failure requires the app connected. Camera only retains the earlier saved-capture loop. The separate Prepare Target command remains available. Multi-target execution is not yet generated. Isolated mount cleanup and completion/cancellation warming passed supervised indoor checks; failure orchestration and active-guide stopping remain unverified on hardware. See [Sequence Execution](sequence-execution.md) for the current contract and limitations.
 
 ## Run
 
