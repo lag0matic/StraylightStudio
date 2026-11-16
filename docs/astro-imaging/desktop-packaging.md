@@ -59,6 +59,8 @@ The current packaging goal is local use, not public distribution. Code signing, 
 
 ## Linux Build Notes
 
+For the first CachyOS / KDE Wayland build, follow the [Linux handoff](linux-cachyos-handoff.md). Start with an isolated offline profile and an unpackaged build; Linux support remains unverified until tested on the target machine.
+
 Packaged desktop connections no longer depend on the Vite proxy. Configure NINA and Stellarium under Settings > Connections and the agent under Frame Transfer. The default deployment remains NINA/PHD2/ASTAP/agent on Starrunner, with Straylight Studio and Stellarium on the operator computer.
 
 Linux builds should use the same app source and runtime config. Build from a Linux machine with the Tauri Linux prerequisites installed:

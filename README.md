@@ -68,6 +68,8 @@ npm run desktop:build
 
 See `docs/astro-imaging/desktop-packaging.md` for the current release checklist.
 
+For the first native Linux build, use the [CachyOS / KDE Wayland handoff](docs/astro-imaging/linux-cachyos-handoff.md). It covers prerequisites, isolated offline testing, and the boundary between the Linux operator app and the Windows telescope server.
+
 See [Current Integration State](docs/astro-imaging/current-integration-state.md) for the latest implementation status, verified behavior, and remaining work.
 
 ## MiniPC Agent
