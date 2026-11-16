@@ -282,6 +282,60 @@ mod tests {
         assert!(validate_url("ws://localhost:1888/v2/tppa", true).is_ok());
         assert!(validate_url("http://[::1]:1888/v2/api", false).is_ok());
     }
+
+    #[tokio::test]
+    async fn native_websocket_channels_send_receive_and_release_ownership() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}/v2/tppa", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+            let request = socket.next().await.unwrap().unwrap();
+            assert_eq!(request, Message::Text("offline-fixture-only".into()));
+            socket.send(Message::Text("offline reply".into())).await.unwrap();
+            assert!(matches!(socket.next().await, Some(Ok(Message::Close(_)))));
+        });
+        let id = "linux-websocket-channel-test".to_string();
+        let (sender, mut receiver) = mpsc::unbounded_channel();
+        let channel = Channel::new(move |body| {
+            sender.send(body.deserialize::<serde_json::Value>().unwrap()).unwrap();
+            Ok(())
+        });
+        let client_id = id.clone();
+        let client = tokio::spawn(async move { network_socket(client_id, url, channel).await });
+        let opened = timeout(Duration::from_secs(5), receiver.recv()).await.unwrap().unwrap();
+        assert_eq!(opened["kind"], "open");
+        network_socket_send(id.clone(), Some("offline-fixture-only".into())).await.unwrap();
+        let reply = timeout(Duration::from_secs(5), receiver.recv()).await.unwrap().unwrap();
+        assert_eq!(reply["kind"], "message");
+        assert_eq!(reply["data"], "offline reply");
+        network_socket_send(id.clone(), None).await.unwrap();
+        timeout(Duration::from_secs(5), client).await.unwrap().unwrap().unwrap();
+        timeout(Duration::from_secs(5), server).await.unwrap().unwrap();
+        assert_eq!(receiver.recv().await.unwrap()["kind"], "close");
+        assert!(!sockets().lock().unwrap().contains_key(&id));
+        assert!(network_socket_send(id, Some("must not replay".into())).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn unavailable_websocket_reports_error_and_close_without_stale_sender() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("ws://{}/v2/socket", listener.local_addr().unwrap());
+        drop(listener);
+        let events = std::sync::Arc::new(Mutex::new(Vec::new()));
+        let captured = events.clone();
+        let channel = Channel::new(move |body| {
+            captured.lock().unwrap().push(body.deserialize::<serde_json::Value>().unwrap());
+            Ok(())
+        });
+        let id = "linux-unavailable-websocket-test".to_string();
+        assert!(timeout(Duration::from_secs(8), network_socket(id.clone(), url, channel)).await.unwrap().is_err());
+        let events = events.lock().unwrap();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0]["kind"], "error");
+        assert_eq!(events[1]["kind"], "close");
+        assert!(!sockets().lock().unwrap().contains_key(&id));
+    }
 }
 
 #[tauri::command]

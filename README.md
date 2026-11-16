@@ -27,7 +27,7 @@ The goal is to keep the heavy, flaky hardware stack close to the telescope while
 - Full sequence runs the active target in NINA; Camera only is the diagnostic capture loop. Native meridian flips are opt-in, use the NINA profile, and passed load/readback checks only. End-only mount actions and completion/cancellation warming passed indoor checks. Actual flips, automatic failure recovery, active-guide stopping, and full light execution still need supervised validation. Multi-target execution is not implemented.
 - The manual Prepare Target command and generated NINA light sequences still need real-sky validation.
 - Generated light sequences still need real-sky validation of autofocus, guiding, dithering, and centering. Siril processing is not finished.
-- Windows desktop behavior has been tested; Linux builds and packaging remain unverified.
+- Windows desktop behavior has been tested. CachyOS debug/release builds, native offline review/restart, and a synthetic AppImage transfer have passed initial checks. The AppImage passed both isolated extract-and-run tests and normal launch from the desktop terminal; remaining Linux acceptance checks are tracked in [Current Integration State](docs/astro-imaging/current-integration-state.md).
 - This is still development software; hardware-moving actions require attention and physical clearance.
 
 ## Development
@@ -58,7 +58,7 @@ dotnet build agents/Starrunner.Agent/Starrunner.Agent.csproj
 npm run agent:test-metadata
 ```
 
-Additional hardware-free UI checks are available through `npm run test:workflow-ui` and, on Windows, `npm run test:standalone-network`. They require an existing Playwright installation; setup and test coverage are described in [Desktop Packaging](docs/astro-imaging/desktop-packaging.md). The standalone harness uses local simulated services and a separate app settings profile.
+Additional hardware-free UI checks are available through `npm run test:workflow-ui`, `npm run test:preview-ui`, and, on Windows, `npm run test:standalone-network`. They require an existing Playwright installation; setup and test coverage are described in [Desktop Packaging](docs/astro-imaging/desktop-packaging.md). The standalone harness uses local simulated services and a separate app settings profile.
 
 Build the packaged desktop app:
 

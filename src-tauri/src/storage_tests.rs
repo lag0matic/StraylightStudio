@@ -1,6 +1,82 @@
 use super::*;
 
 #[test]
+#[ignore = "camera-sized synthetic FITS check; allocates full-resolution image samples"]
+fn camera_sized_fits_preserves_raw_analysis_across_stretch() {
+    let directory = TestFolder::new();
+    let path = directory.0.join("camera-sized synthetic.fits");
+    let cards = [
+        "SIMPLE  =                    T", "BITPIX  =                   16",
+        "NAXIS   =                    2", "NAXIS1  =                 5496",
+        "NAXIS2  =                 3672", "BZERO   =                32768",
+        "BSCALE  =                    1", "BAYERPAT= 'RGGB'",
+    ];
+    let mut header = cards.iter().flat_map(|card| format!("{card:<80}").into_bytes()).collect::<Vec<_>>();
+    header.resize(2880, b' ');
+    header.extend_from_slice(format!("{:<80}", "END").as_bytes());
+    header.resize(5760, b' ');
+    let row = (0..5496).flat_map(|x| ((1000 + (x % 256) * 16 - 32768) as i16).to_be_bytes()).collect::<Vec<_>>();
+    let mut file = fs::File::create(&path).unwrap();
+    file.write_all(&header).unwrap();
+    for _ in 0..3672 { file.write_all(&row).unwrap(); }
+    let padding = (2880 - (row.len() * 3672) % 2880) % 2880;
+    file.write_all(&vec![0; padding]).unwrap();
+    drop(file);
+    let before = fs::metadata(&path).unwrap();
+    let original_hash = sha256_hex(&fs::read(&path).unwrap());
+    let mut request = FitsPreviewRequest {
+        path: path.to_string_lossy().into(), max_size: Some(960), auto_stretch: Some(true),
+        black_point: None, midtone: None, white_point: None,
+    };
+    let started = std::time::Instant::now();
+    let auto = render_fits_preview_from_path(path.clone(), &request).unwrap();
+    let first = started.elapsed();
+    let analysis = auto.analysis.as_ref().unwrap();
+    assert_eq!((analysis.width, analysis.height, analysis.valid_samples), (5496, 3672, 20_181_312));
+    assert_eq!(analysis.median, Some(3000.0));
+    assert!((analysis.mean.unwrap() - 3016.244541484716).abs() < 0.000001, "mean {:?}", analysis.mean);
+    assert_eq!((analysis.min, analysis.max), (Some(1000.0), Some(5080.0)));
+    assert_eq!(analysis.histogram.iter().sum::<u64>(), 20_181_312);
+    assert!(auto.color);
+    request.auto_stretch = Some(false);
+    request.black_point = Some(1000.0); request.white_point = Some(5080.0); request.midtone = Some(1.8);
+    let started = std::time::Instant::now();
+    let manual = render_fits_preview_from_path(path.clone(), &request).unwrap();
+    let restretch = started.elapsed();
+    assert_ne!(auto.data_url, manual.data_url);
+    assert_eq!(serde_json::to_value(&auto.analysis).unwrap(), serde_json::to_value(&manual.analysis).unwrap());
+    assert_eq!(fs::metadata(&path).unwrap().modified().unwrap(), before.modified().unwrap());
+    assert_eq!(sha256_hex(&fs::read(&path).unwrap()), original_hash);
+    println!("Camera-sized FITS: {} bytes; initial {:?}; cached stretch {:?}; preview {}x{}; source unchanged", before.len(), first, restretch, auto.width, auto.height);
+}
+
+#[test]
+fn storage_write_probe_requires_a_directory_and_leaves_no_files() {
+    let directory = TestFolder::new();
+    assert!(storage_root_writable(&directory.0));
+    assert_eq!(fs::read_dir(&directory.0).unwrap().count(), 0);
+    assert!(!storage_root_writable(&directory.0.join("missing")));
+    let file = directory.0.join("file");
+    fs::write(&file, b"original").unwrap();
+    assert!(!storage_root_writable(&file));
+    assert_eq!(fs::read(&file).unwrap(), b"original");
+}
+
+#[cfg(unix)]
+#[test]
+fn storage_write_probe_rejects_a_read_only_directory() {
+    use std::os::unix::fs::PermissionsExt;
+    let directory = TestFolder::new();
+    let original = fs::metadata(&directory.0).unwrap().permissions();
+    fs::set_permissions(&directory.0, fs::Permissions::from_mode(0o555)).unwrap();
+    let writable = storage_root_writable(&directory.0);
+    // Restore permissions before asserting so the temporary test folder is cleanable.
+    fs::set_permissions(&directory.0, original).unwrap();
+    assert!(!writable, "read-only destination must not be advertised as writable");
+    assert_eq!(fs::read_dir(&directory.0).unwrap().count(), 0);
+}
+
+#[test]
 fn settings_are_replaced_as_complete_json_and_failed_publication_is_reported() {
     let directory = TestFolder::new();
     let path = directory.0.join("settings.json");

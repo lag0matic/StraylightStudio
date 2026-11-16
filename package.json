@@ -13,6 +13,7 @@
     "test:operations": "node --test tools/test-operations.mjs",
     "test:sequences": "node --test tools/test-nina-sequence.mjs",
     "test:workflow-ui": "node tools/test-workflow-ui.mjs",
+    "test:preview-ui": "node tools/test-fits-preview-ui.mjs",
     "test:standalone-network": "node tools/test-standalone-network.mjs",
     "check:app": "npm run build && npm run test:operations && npm run test:sequences && npm run desktop:test",
     "check:agent": "npm run agent:build && npm run agent:test-metadata",

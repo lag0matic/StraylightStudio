@@ -986,7 +986,7 @@ fn get_storage_status(app: AppHandle) -> Result<StorageStatus, String> {
     let session_root = settings_string(&settings, STORAGE_SESSION_ROOT_KEY);
     let writable = session_root
         .as_ref()
-        .map(|root| PathBuf::from(root).is_dir())
+        .map(|root| storage_root_writable(Path::new(root)))
         .unwrap_or(false);
 
     let mode = if session_root.is_some() {
@@ -1000,6 +1000,19 @@ fn get_storage_status(app: AppHandle) -> Result<StorageStatus, String> {
         session_root,
         writable,
     })
+}
+
+fn storage_root_writable(root: &Path) -> bool {
+    if !root.is_dir() {
+        return false;
+    }
+    let Ok((temporary, mut file)) = TemporaryFile::create(root) else {
+        return false;
+    };
+    let writable = file.write_all(&[0]).and_then(|_| file.sync_all()).is_ok();
+    drop(file);
+    drop(temporary);
+    writable
 }
 
 #[tauri::command]

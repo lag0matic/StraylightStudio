@@ -265,6 +265,7 @@ type PreviewImage = {
   height?: number;
   sourcePath?: string;
   sourceKind?: 'bitmap' | 'fits';
+  selectedFile?: boolean;
   fitsHeader?: Array<{ key: string; value: string }>;
   analysis?: FitsAnalysis;
   fitsBlack?: number;
@@ -2894,6 +2895,8 @@ function AcquisitionTab({
   const [captureMessage, setCaptureMessage] = useState('');
   const [captureStats, setCaptureStats] = useState<CaptureStats | null>(null);
   const [previewRendering, setPreviewRendering] = useState(false);
+  const [previewNotice, setPreviewNotice] = useState('');
+  const [previewError, setPreviewError] = useState('');
   const [previewDragActive, setPreviewDragActive] = useState(false);
   const [monitorTab, setMonitorTab] = useState<AcquisitionMonitorTab>(workspaceState.monitorTab);
   const [collapsedPanels, setCollapsedPanels] = useState<Record<AcquisitionPanelKey, boolean>>(workspaceState.collapsedPanels);
@@ -3066,10 +3069,12 @@ function AcquisitionTab({
     }));
   }, [createTargetPrepTrace]);
 
-  const renderFitsPath = useCallback(async (path: string, name?: string, sizeBytes = 0, selectedFile = false) => {
+  const renderFitsPath = useCallback(async (path: string, name?: string, sizeBytes = 0, selectedFile = false, autoStretch = fitsAutoStretch) => {
     const renderId = previewRenderIdRef.current + 1;
     previewRenderIdRef.current = renderId;
     setPreviewRendering(true);
+    setPreviewError('');
+    setPreviewNotice('Rendering FITS preview...');
     setCaptureMessage('Rendering FITS preview...');
 
     try {
@@ -3077,7 +3082,7 @@ function AcquisitionTab({
         window.setTimeout(() => resolve(null), 45000);
       });
       const preview = await Promise.race([
-        storageClient.renderFitsPreview(path, renderStretch, fitsAutoStretch, previewRenderMaxSize(appSettings.previewRenderSize), selectedFile),
+        storageClient.renderFitsPreview(path, renderStretch, autoStretch, previewRenderMaxSize(appSettings.previewRenderSize), selectedFile),
         timeout
       ]);
 
@@ -3091,7 +3096,7 @@ function AcquisitionTab({
         return;
       }
 
-      if (fitsAutoStretch) {
+      if (autoStretch) {
         setStretch({
           blackPoint: Math.max(0, Math.round(preview.black_point)),
           midtone: Number(preview.midtone.toFixed(2)),
@@ -3108,15 +3113,20 @@ function AcquisitionTab({
         height: preview.height,
         sourcePath: preview.source_path,
         sourceKind: 'fits',
+        selectedFile,
         fitsHeader: preview.header,
         analysis: preview.analysis ?? undefined,
         fitsBlack: preview.black_point,
         fitsWhite: preview.white_point
       });
       setCaptureMessage('FITS preview rendered.');
+      setPreviewNotice('FITS preview rendered.');
     } catch (caught) {
       if (previewRenderIdRef.current === renderId) {
-        setCaptureMessage(caught instanceof Error ? caught.message : 'Unable to render FITS preview.');
+        const detail = caught instanceof Error ? caught.message : typeof caught === 'string' ? caught : 'Unable to render FITS preview.';
+        setCaptureMessage(detail);
+        setPreviewNotice('');
+        setPreviewError(`Could not render ${name || path.split(/[\\/]/).pop() || 'FITS file'}: ${detail}`);
       }
     } finally {
       if (previewRenderIdRef.current === renderId) {
@@ -3129,6 +3139,7 @@ function AcquisitionTab({
     previewRenderIdRef.current += 1;
     setPreviewRendering(false);
     setCaptureMessage('FITS preview render canceled.');
+    setPreviewNotice('FITS preview render canceled.');
   };
 
   useEffect(() => {
@@ -3293,7 +3304,7 @@ function AcquisitionTab({
     let cancelled = false;
     const timeoutId = window.setTimeout(() => {
       if (!cancelled) {
-        void renderFitsPath(previewImage.sourcePath!, previewImage.name, previewImage.sizeBytes);
+        void renderFitsPath(previewImage.sourcePath!, previewImage.name, previewImage.sizeBytes, previewImage.selectedFile);
       }
     }, 80);
 
@@ -3307,6 +3318,7 @@ function AcquisitionTab({
     previewImage?.sourcePath,
     previewImage?.name,
     previewImage?.sizeBytes,
+    previewImage?.selectedFile,
     renderStretch.blackPoint,
     renderStretch.midtone,
     renderStretch.whitePoint
@@ -3337,11 +3349,13 @@ function AcquisitionTab({
   const loadPreviewFile = (file: File) => {
     if (isFitsFileName(file.name)) {
       setCaptureMessage('Use Open FITS to load FITS files so Straylight can render the real file path.');
+      setPreviewNotice('Use Open FITS to load FITS files so Straylight can render the real file path.');
       return;
     }
 
     if (!file.type.startsWith('image/')) {
       setCaptureMessage('Preview supports image files here. FITS files need Open FITS in the desktop app.');
+      setPreviewNotice('Preview supports image files here. FITS files need Open FITS in the desktop app.');
       return;
     }
 
@@ -3376,12 +3390,15 @@ function AcquisitionTab({
     }
 
     setCaptureMessage('Opening FITS file picker...');
+    setPreviewError('');
+    setPreviewNotice('Opening FITS file picker...');
 
     try {
       const selectedPath = await storageClient.choosePreviewFile();
 
       if (!selectedPath) {
         setCaptureMessage('FITS open canceled.');
+        setPreviewNotice('FITS open canceled.');
         return;
       }
 
@@ -3390,9 +3407,13 @@ function AcquisitionTab({
         return;
       }
 
+      setPreviewImage(null);
       await renderFitsPath(selectedPath, undefined, 0, true);
     } catch (caught) {
-      setCaptureMessage(caught instanceof Error ? caught.message : 'Unable to open FITS preview.');
+      const detail = caught instanceof Error ? caught.message : typeof caught === 'string' ? caught : 'Unable to open FITS preview.';
+      setCaptureMessage(detail);
+      setPreviewNotice('');
+      setPreviewError(detail);
     }
   };
 
@@ -3415,6 +3436,7 @@ function AcquisitionTab({
   const setAutoStretch = () => {
     if (previewImage?.sourceKind === 'fits') {
       setFitsAutoStretch(true);
+      if (previewImage.sourcePath) void renderFitsPath(previewImage.sourcePath, previewImage.name, previewImage.sizeBytes, previewImage.selectedFile, true);
     } else {
       setStretch({
         blackPoint: 600,
@@ -4180,11 +4202,12 @@ function AcquisitionTab({
               >
                 Reload Latest
               </button>
-              <button type="button" onClick={() => setPreviewImage(null)} disabled={!previewImage}>
+              <button type="button" onClick={() => { setPreviewImage(null); setPreviewError(''); setPreviewNotice(''); }} disabled={!previewImage}>
                 Clear
               </button>
               <div className="preview-file-name">{previewImage?.name || pipelineState.history[0]?.fileName || 'Waiting for frame'}</div>
             </div>
+            {previewError ? <div className="preview-feedback error" role="alert">{previewError}</div> : previewNotice ? <div className="preview-feedback" role="status">{previewNotice}</div> : null}
             <div className="preview-path-row" title={previewSource}>
               <span>Source</span>
               <strong>{previewSource}</strong>

@@ -1493,6 +1493,19 @@ h2 {
   padding: 0 7px;
 }
 
+.preview-feedback {
+  padding: 8px 12px;
+  color: var(--muted);
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.preview-feedback.error {
+  color: #e0a2a2;
+  border-left: 3px solid #e0a2a2;
+  background: rgba(170, 55, 55, 0.12);
+}
+
 .preview-box img {
   display: block;
   object-fit: contain;
