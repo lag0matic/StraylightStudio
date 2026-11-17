@@ -4924,6 +4924,14 @@ function DiagnosticsTab({
   ninaVersion: string;
 }) {
   const [initialDiagnosticsState] = useState(loadDiagnosticsSessionState);
+  const [tppaLogPath, setTppaLogPath] = useState(tauriClient.isDesktopRuntime() ? 'Checking' : 'Desktop only');
+  useEffect(() => {
+    let active = true;
+    void tauriClient.invokeIfDesktop<string>('tppa_log_path')
+      .then((path) => { if (active && path) setTppaLogPath(path); })
+      .catch((error) => { if (active) setTppaLogPath(`Unavailable: ${String(error)}`); });
+    return () => { active = false; };
+  }, []);
   const [diagnostics, setDiagnostics] = useState<DiagnosticResult[]>(initialDiagnosticsState.diagnostics);
   const [diagnosticsRunning, setDiagnosticsRunning] = useState(false);
   const [diagnosticsRunAt, setDiagnosticsRunAt] = useState(initialDiagnosticsState.diagnosticsRunAt);
@@ -5068,7 +5076,8 @@ function DiagnosticsTab({
     ['Altitude error', formatTppaError(tppaWorkflow.altitudeError)],
     ['Total error', formatTppaError(tppaWorkflow.totalError)],
     ['Socket', tppaWorkflow.socket],
-    ['Updated', tppaWorkflow.lastUpdated]
+    ['Updated', tppaWorkflow.lastUpdated],
+    ['Event log', tppaLogPath]
   ];
 
   return (
@@ -5606,6 +5615,14 @@ function App() {
 
       const receivedAt = new Date().toLocaleTimeString();
       const update = tppaStateFromRaw(raw, ++tppaEventIdRef.current, receivedAt);
+      void tauriClient.invokeIfDesktop('tppa_log_parsed', { record: {
+        eventId: tppaEventIdRef.current,
+        step: update.step,
+        status: update.status,
+        azimuthError: update.azimuthError ?? null,
+        altitudeError: update.altitudeError ?? null,
+        totalError: update.totalError ?? null
+      } }).catch((error) => console.warn('TPPA parsed-event logging failed', error));
       setTppaWorkflow((current) => ({
         ...current,
         ...update,

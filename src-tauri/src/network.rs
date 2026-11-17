@@ -7,6 +7,7 @@ use std::{
     time::Duration,
 };
 use tauri::ipc::Channel;
+use tauri::Manager;
 use tokio::{sync::mpsc, time::timeout};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 
@@ -123,7 +124,40 @@ fn sockets() -> &'static Mutex<HashMap<String, SocketCommands>> {
     SOCKETS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+fn is_tppa_url(url: &str) -> bool {
+    validate_url(url, true).is_ok_and(|url| url.path() == "/v2/tppa")
+}
+
+fn tppa_log_record(id: &str, event: &str, text: Option<&str>) -> serde_json::Value {
+    let mut record = serde_json::json!({ "socket_id": id, "event": event });
+    if let Some(text) = text {
+        let mut end = text.len().min(64 * 1024);
+        while !text.is_char_boundary(end) { end -= 1; }
+        record["data"] = text[..end].into();
+        record["bytes"] = text.len().into();
+        record["truncated"] = (end < text.len()).into();
+    }
+    record
+}
+
+fn log_tppa(id: &str, event: &str, text: Option<&str>) {
+    log::info!(target: "tppa", "{}", tppa_log_record(id, event, text));
+}
+
+#[tauri::command]
+pub fn tppa_log_path(app: tauri::AppHandle) -> Result<String, String> {
+    app.path().app_log_dir()
+        .map(|path| path.join("tppa.log").to_string_lossy().into_owned())
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn tppa_log_parsed(record: serde_json::Value) {
+    log_tppa("renderer", "parsed", Some(&record.to_string()));
+}
+
 async fn socket_session(
+    id: &str,
     url: &str,
     events: Channel<SocketEvent>,
     mut commands: mpsc::Receiver<Option<String>>,
@@ -134,6 +168,8 @@ async fn socket_session(
         _ = commands.recv() => return Ok(()),
     };
     let (mut socket, _) = connection;
+    let tppa = is_tppa_url(url);
+    if tppa { log_tppa(id, "open", None); }
     events
         .send(SocketEvent {
             kind: "open",
@@ -148,12 +184,20 @@ async fn socket_session(
                 _ => { let _ = timeout(Duration::from_secs(2), socket.close(None)).await; break; }
             },
             incoming = socket.next() => match incoming {
-                Some(Ok(Message::Text(text))) => events.send(SocketEvent { kind: "message", data: Some(text.to_string()) }).map_err(|error| error.to_string())?,
+                Some(Ok(Message::Text(text))) => {
+                    // Capture before IPC delivery so renderer/parser failures cannot hide the payload.
+                    if tppa { log_tppa(id, "received", Some(text.as_ref())); }
+                    events.send(SocketEvent { kind: "message", data: Some(text.to_string()) }).map_err(|error| error.to_string())?;
+                },
                 Some(Ok(Message::Ping(bytes))) => {
                     timeout(Duration::from_secs(6), socket.send(Message::Pong(bytes))).await
                         .map_err(|_| "Event reply timed out")?.map_err(|error| error.to_string())?;
                 },
-                Some(Ok(Message::Close(_))) | None => break,
+                Some(Ok(Message::Close(frame))) => {
+                    if tppa { log_tppa(id, "remote-close", Some(&format!("{frame:?}"))); }
+                    break;
+                },
+                None => break,
                 Some(Err(error)) => return Err(error.to_string()),
                 _ => {},
             }
@@ -166,6 +210,23 @@ async fn socket_session(
 mod tests {
     use super::*;
     use std::io::{Read, Write};
+
+    #[test]
+    fn tppa_logging_is_scoped_and_preserves_raw_text() {
+        assert!(is_tppa_url("ws://localhost:1888/v2/tppa"));
+        assert!(!is_tppa_url("ws://localhost:1888/v2/socket"));
+        assert!(!is_tppa_url("file:///v2/tppa"));
+        let text = "{\"Response\":{\"AzimuthError\":0.2}}\nmalformed next line";
+        let record = tppa_log_record("test", "received", Some(text));
+        let roundtrip: serde_json::Value = serde_json::from_str(&record.to_string()).unwrap();
+        assert_eq!(roundtrip["data"], text);
+        assert_eq!(roundtrip["truncated"], false);
+        let large = "\u{00e9}".repeat(40000);
+        let bounded = tppa_log_record("test", "received", Some(&large));
+        assert_eq!(bounded["bytes"], large.len());
+        assert_eq!(bounded["truncated"], true);
+        assert!(bounded["data"].as_str().unwrap().len() <= 64 * 1024);
+    }
 
     fn http_server(
         response: &'static [u8],
@@ -299,17 +360,24 @@ pub async fn network_socket(
         }
         registry.insert(id.clone(), sender);
     }
-    let result = socket_session(&url, events.clone(), receiver).await;
+    let tppa = is_tppa_url(&url);
+    if tppa {
+        let endpoint = validate_url(&url, true)?;
+        log_tppa(&id, "connecting", Some(&format!("{}{path}", endpoint.origin().ascii_serialization(), path = endpoint.path())));
+    }
+    let result = socket_session(&id, &url, events.clone(), receiver).await;
     sockets()
         .lock()
         .map_err(|_| "Event registry unavailable")?
         .remove(&id);
     if let Err(error) = &result {
+        if tppa { log_tppa(&id, "error", Some(error)); }
         let _ = events.send(SocketEvent {
             kind: "error",
             data: Some(format!("Unable to use event connection {url}: {error}")),
         });
     }
+    if tppa { log_tppa(&id, "closed", None); }
     let _ = events.send(SocketEvent {
         kind: "close",
         data: None,

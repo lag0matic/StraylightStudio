@@ -1,8 +1,14 @@
 # Current Integration State
 
-Last updated: 2026-11-14.
+Last updated: 2026-11-17.
 
 This file is the short handoff note for where Straylight Studio actually stands right now.
+
+## November 17 TPPA Diagnostics
+
+- David's live NINA log confirms a Studio-issued TPPA start, three successful measurement positions, and correction calculations after setting the RedCat focal length to 250 mm. Linux Studio did not display corrections; the log does not contain the transmitted WebSocket payloads, so the cause remains unconfirmed. Later passive Windows probes occurred after the alignment updates stopped and cannot diagnose that failure.
+- Native desktop builds now persist bounded TPPA raw input, connection lifecycle, and frontend parsing summaries in `tppa.log`, including release builds. Diagnostics > TPPA Parser shows the path. See [Desktop Runtime](desktop-runtime.md#persistent-tppa-diagnostics) for retention and collection details. No parser behavior or equipment commands were changed.
+- All 88 core tests and the isolated Windows standalone checks passed, including log persistence and test-profile isolation. No live equipment commands were sent for this change. Linux compilation of this logging update and live event capture still require validation on that machine/next alignment.
 
 ## November 14 UI Cleanup
 

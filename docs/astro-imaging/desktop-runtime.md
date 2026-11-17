@@ -1,5 +1,20 @@
 # Desktop Runtime
 
+## Persistent TPPA Diagnostics
+
+Native Windows and Linux builds record TPPA diagnostics automatically, including release builds. Diagnostics > TPPA Parser > Event log shows the actual `tppa.log` path for the running app identity. The browser-only shell does not write this native log.
+
+The log records app startup/version/OS, connection attempts and socket IDs, open/error/close events, incoming raw text before delivery to the frontend, and the frontend's parsed step/status/error values. Invalid JSON is retained as raw text too. It does not start, restart, or otherwise control alignment. A successful connection without `received` records distinguishes a silent observation window from a frontend parse/display problem, but only if TPPA was actively producing corrections during that window.
+
+Files rotate at 4 MiB with three rotated files retained. Individual text records retain up to 64 KiB with explicit original byte count and truncation flags. Raw text is JSON-escaped so embedded newlines do not masquerade as separate records. Only the TPPA socket is captured, not image bodies or general event traffic. Logs can contain server addresses and observed payload contents; inspect before sharing publicly.
+
+Typical paths (the Diagnostics path is authoritative, especially with test identities or Linux XDG overrides):
+
+- Windows: `%LOCALAPPDATA%\com.straylightastro.studio\logs\tppa.log`
+- Linux: `$XDG_DATA_HOME/com.straylightastro.studio/logs/tppa.log`, or `~/.local/share/com.straylightastro.studio/logs/tppa.log` when unset.
+
+After a reproduction, copy `tppa.log` and any rotated siblings before further sessions overwrite them. This is diagnostic retention, not an archival event store. The isolated standalone test verifies persisted raw messages, lifecycle events, parser records, and profile isolation without contacting the real rig.
+
 September 27, 2026: Acquisition and Settings now stay mounted for the life of the hydrated app, independently of the selected tab. This preserves capture/preparation state and keeps transfer polling active across navigation. An app-owned operation gate coordinates acquisition commands and cancellation; it is not durable across app exit or reload. Hardware-free regression checks are described in `current-integration-state.md`.
 
 Straylight Studio should become a cross-platform desktop application, not a browser-only control panel. The current Vite/React app is the prototype shell and should continue to be useful while the runtime moves toward a packaged desktop app.

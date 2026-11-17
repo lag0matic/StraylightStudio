@@ -147,6 +147,21 @@ try {
   assert.deepEqual(messages, ['offline-test']);
   console.log('PASS TPPA native channel send, receive, and close');
 
+  const tppaLogPath = await page.evaluate(async () => {
+    const api = window.__TAURI_INTERNALS__;
+    await api.invoke('tppa_log_parsed', { record: { eventId: 991, azimuthError: -1.42, altitudeError: 0.84, totalError: 1.65 } });
+    return api.invoke('tppa_log_path');
+  });
+  assert.ok(tppaLogPath.includes('com.straylightastro.networktest'), 'TPPA log must use isolated app identity');
+  await until(async () => {
+    const log = await readFile(tppaLogPath, 'utf8').catch(() => '');
+    return log.includes('"event":"app-start"') && log.includes('"event":"connecting"')
+      && log.includes('"event":"open"') && log.includes('"event":"received"')
+      && log.includes('offline reply') && log.includes('"event":"closed"')
+      && log.includes('"event":"parsed"') && log.includes('991');
+  }, 'persistent TPPA raw, connection, and parser log');
+  console.log('PASS persistent TPPA raw payloads, socket lifecycle, parsed diagnostics, and isolated log path');
+
   await page.getByRole('button', { name: 'Settings', exact: true }).click();
   await page.getByLabel('NINA address', { exact: true }).fill(`${origin}/wrong-path`);
   await page.getByRole('button', { name: 'Save Connections', exact: true }).click();

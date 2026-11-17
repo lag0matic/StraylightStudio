@@ -1229,13 +1229,17 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
-            if cfg!(debug_assertions) {
-                app.handle().plugin(
-                    tauri_plugin_log::Builder::default()
-                        .level(log::LevelFilter::Info)
-                        .build(),
-                )?;
-            }
+            app.handle().plugin(
+                tauri_plugin_log::Builder::default()
+                    .level(log::LevelFilter::Info)
+                    .targets([tauri_plugin_log::Target::new(
+                        tauri_plugin_log::TargetKind::LogDir { file_name: Some("tppa".into()) },
+                    ).filter(|metadata| metadata.target() == "tppa")])
+                    .max_file_size(4 * 1024 * 1024)
+                    .rotation_strategy(tauri_plugin_log::RotationStrategy::KeepSome(3))
+                    .build(),
+            )?;
+            log::info!(target: "tppa", "{}", json!({ "event": "app-start", "version": app.package_info().version.to_string(), "os": std::env::consts::OS }));
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -1245,6 +1249,8 @@ pub fn run() {
             network::network_http,
             network::network_socket,
             network::network_socket_send,
+            network::tppa_log_path,
+            network::tppa_log_parsed,
             load_settings,
             save_settings,
             reset_settings,
